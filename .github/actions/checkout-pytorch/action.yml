@@ -22,6 +22,12 @@ runs:
           rm -rf "${GITHUB_WORKSPACE}"
         fi
         mkdir "${GITHUB_WORKSPACE}"
+
+    - name: echo
+      shell: bash
+      env:
+        THING: ${{ github.event }}
+      run: echo "$THING"
     - name: Checkout PyTorch
       uses: clee2000/checkout@fetch-depth
       with:
@@ -33,6 +39,7 @@ runs:
       with:
         ref: refs/heads/master
         fetch-depth: -1
+
     - name: Checkout PyTorch
       uses: clee2000/checkout@fetch-depth
       with:
