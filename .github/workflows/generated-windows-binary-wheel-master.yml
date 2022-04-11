@@ -86,7 +86,7 @@ jobs:
           echo "PYTORCH_FINAL_PACKAGE_DIR=${RUNNER_TEMP}/artifacts" >> "${GITHUB_ENV}"
           echo "WIN_PACKAGE_WORK_DIR=${RUNNER_TEMP}"
       - name: Checkout PyTorch
-        uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+        uses: clee2000/checkout@fetch-depth
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
@@ -97,7 +97,7 @@ jobs:
           git clean -fxd
         working-directory: pytorch
       - name: Checkout pytorch/builder
-        uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+        uses: clee2000/checkout@fetch-depth
         with:
           ref: main
           submodules: recursive
@@ -196,7 +196,7 @@ jobs:
           name: wheel-py3_7-cuda11_3
           path: "${{ env.PYTORCH_FINAL_PACKAGE_DIR }}"
       - name: Checkout PyTorch
-        uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+        uses: clee2000/checkout@fetch-depth
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           submodules: recursive
@@ -207,7 +207,7 @@ jobs:
           git clean -fxd
         working-directory: pytorch
       - name: Checkout pytorch/builder
-        uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+        uses: clee2000/checkout@fetch-depth
         with:
           ref: main
           submodules: recursive

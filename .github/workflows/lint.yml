@@ -7,6 +7,23 @@ on:
   pull_request:
 
 jobs:
+  please-ignore:
+    name: please-ignore
+    runs-on: ubuntu-18.04
+    env:
+      THINGY: "hello adsfasdfasdf"
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.x
+          architecture: x64
+      # [see note: pytorch repo ref]
+      # deep clone (fetch-depth 0 required to use git merge-base)
+      - name: Checkout PyTorch
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
+      - name: composite
+        uses: ./.github/actions/echo/other
   quick-checks:
     name: quick-checks
     runs-on: ubuntu-18.04
@@ -18,7 +35,7 @@ jobs:
           architecture: x64
       # [see note: pytorch repo ref]
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Clean PyTorch checkout
         run: |
           # Remove any artifacts from the previous checkouts
@@ -127,7 +144,7 @@ jobs:
       # [see note: pytorch repo ref]
       # deep clone (fetch-depth 0 required to use git merge-base)
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Run clang-format
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -166,7 +183,7 @@ jobs:
           architecture: x64
       # [see note: pytorch repo ref]
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Attempt to run setup.py
         run: |
           if ! python2 setup.py | grep -q "Python 2 has reached end-of-life and is no longer supported by PyTorch."; then
@@ -187,7 +204,7 @@ jobs:
           architecture: x64
       # [see note: pytorch repo ref]
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Install requirements
         id: requirements
         run: |
@@ -197,7 +214,7 @@ jobs:
           pip3 install Jinja2==3.0.1 --user
       # [see note: pytorch repo ref]
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Regenerate workflows
         id: generate_workflows
         run: .github/scripts/generate_ci_workflows.py
@@ -273,7 +290,7 @@ jobs:
         uses: actions/setup-node@v2
       # [see note: pytorch repo ref]
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Install markdown-toc
         run: npm install -g markdown-toc
       - name: Regenerate ToCs and check that they didn't change
@@ -312,7 +329,7 @@ jobs:
       # [see note: pytorch repo ref]
       # fetch-depth 2 required to allow us to use github.event.pull_request.head.sha
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Prepare output dir with HEAD commit SHA
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -356,7 +373,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          check_name: 'flake8-py3'
+          check_name: "flake8-py3"
           linter_output_path: flake8-output/annotations.json
           commit_sha: ${{ github.event.pull_request.head.sha }}
           mode: json
@@ -375,7 +392,7 @@ jobs:
       # [see note: pytorch repo ref]
       # deep clone (fetch-depth 0) to allow tools/linter/clang_tidy.py to do its thing
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
         with:
           no-sudo: true
       - name: Prepare output dir with HEAD commit SHA
@@ -454,7 +471,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          check_name: 'clang-tidy'
+          check_name: "clang-tidy"
           linter_output_path: clang-tidy/annotations.json
           commit_sha: ${{ github.event.pull_request.head.sha }}
           mode: json
@@ -470,7 +487,7 @@ jobs:
           architecture: x64
       # [see note: pytorch repo ref]
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Install dependencies
         run: |
           set -eux
@@ -494,7 +511,7 @@ jobs:
           architecture: x64
       # [see note: pytorch repo ref]
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Install dependencies
         run: |
           set -eux
@@ -539,7 +556,7 @@ jobs:
       # [see note: pytorch repo ref]
       # deep clone (fetch-depth 0) required, to allow us to use git log
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Install dependencies
         # mypy and boto3 versions copied from
         # .circleci/docker/common/install_conda.sh
@@ -569,7 +586,7 @@ jobs:
       # [see note: pytorch repo ref]
       # deep clone (fetch-depth 0) required, to allow us to use git log
       - name: Checkout PyTorch
-        uses: pytorch/pytorch/.github/actions/checkout-pytorch@master
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@clee2000/please-ignore
       - name: Install torch
         if: matrix.with_torch == 'with_torch'
         run: |

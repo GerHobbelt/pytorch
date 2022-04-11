@@ -22,11 +22,21 @@ runs:
           rm -rf "${GITHUB_WORKSPACE}"
         fi
         mkdir "${GITHUB_WORKSPACE}"
+    - name: Checkout PyTorch
+      uses: clee2000/checkout@fetch-depth
+      with:
+        ref: refs/heads/viable/strict
+        fetch-depth: -1
 
     - name: Checkout PyTorch
-      uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+      uses: clee2000/checkout@fetch-depth
+      with:
+        ref: refs/heads/master
+        fetch-depth: -1
+    - name: Checkout PyTorch
+      uses: clee2000/checkout@fetch-depth
       with:
         ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         # deep clone, to allow use of git merge-base
-        fetch-depth: 0
+        fetch-depth: ${{ github.event_name == 'pull_request' && github.event.pull_request.commits || github.event.commits.length || 100 }}
         submodules: recursive

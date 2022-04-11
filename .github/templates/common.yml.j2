@@ -232,7 +232,7 @@ on:
 
 {%- macro checkout(submodules="recursive", deep_clone=True, directory="", repository="pytorch/pytorch", branch="", checkout_pr_head=True) -%}
       - name: Checkout !{{ 'PyTorch' if repository == "pytorch/pytorch" else repository }}
-        uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+        uses: clee2000/checkout@fetch-depth
         with:
       {%- if branch %}
           ref: !{{ branch }}
@@ -241,7 +241,7 @@ on:
       {%- endif %}
       {%- if deep_clone %}
           # deep clone, to allow use of git merge-base
-          fetch-depth: 0
+          fetch-depth: 100
       {%- endif %}
           submodules: !{{ submodules }}
       {%- if repository != "pytorch/pytorch" %}

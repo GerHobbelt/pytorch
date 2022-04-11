@@ -2,7 +2,7 @@ name: docker-release-builds
 on:
   schedule:
     # Push the nightly docker daily at 1 PM UTC
-    - cron: '0 13 * * *'
+    - cron: "0 13 * * *"
   # Trigger when we modify something related to these images
   pull_request:
     paths:
@@ -22,7 +22,7 @@ jobs:
       WITH_PUSH: ${{ github.event_name == 'schedule' }}
     steps:
       - name: Checkout PyTorch
-        uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+        uses: clee2000/checkout@fetch-depth
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - uses: nick-fields/retry@71062288b76e2b6214ebde0e673ce0de1755740a

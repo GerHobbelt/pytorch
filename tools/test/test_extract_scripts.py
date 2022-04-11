@@ -20,7 +20,7 @@ class TestExtractScripts(unittest.TestCase):
         self.assertEqual(
             extract_scripts.extract({
                 'name': 'Checkout PyTorch',
-                'uses': 'zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9',
+                'uses': 'clee2000/checkout@5304eead2e9302d0257766b8483eea1f6b6288c4',
             }),
             None,
         )

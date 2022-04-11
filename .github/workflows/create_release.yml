@@ -2,7 +2,7 @@ name: Create Release
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
     branches:
       - master
       - main
@@ -17,9 +17,9 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     steps:
-      - uses: zhouzhuojie/checkout@05b13c9a0d21f08f6d5e64a1d5042246d13619d9
+      - uses: clee2000/checkout@fetch-depth
         with:
-          submodules: 'recursive'
+          submodules: "recursive"
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Fake name for PRs
         if: ${{ github.event_name == 'pull_request' }}
@@ -35,16 +35,16 @@ jobs:
           echo "PT_RELEASE_FILE=pytorch-$tag_or_branch.tar.gz" >> "$GITHUB_ENV"
       - name: Create source distribution
         run: |
-            # Create new folder with specified name so extracting the archive yields that
-            rm -rf "/tmp/$PT_RELEASE_NAME"
-            cp -r "$PWD" "/tmp/$PT_RELEASE_NAME"
-            mv "/tmp/$PT_RELEASE_NAME" .
-            # Cleanup
-            rm -r "$PT_RELEASE_NAME"/{.azure_pipelines,.circleci,.jenkins}
-            find "$PT_RELEASE_NAME" -name '.git*' -exec rm -rv {} \; || true
-            # Create archive
-            tar -czf "$PT_RELEASE_FILE" "$PT_RELEASE_NAME"
-            echo "Created source archive $PT_RELEASE_FILE with content: $(ls -a "$PT_RELEASE_NAME")"
+          # Create new folder with specified name so extracting the archive yields that
+          rm -rf "/tmp/$PT_RELEASE_NAME"
+          cp -r "$PWD" "/tmp/$PT_RELEASE_NAME"
+          mv "/tmp/$PT_RELEASE_NAME" .
+          # Cleanup
+          rm -r "$PT_RELEASE_NAME"/{.azure_pipelines,.circleci,.jenkins}
+          find "$PT_RELEASE_NAME" -name '.git*' -exec rm -rv {} \; || true
+          # Create archive
+          tar -czf "$PT_RELEASE_FILE" "$PT_RELEASE_NAME"
+          echo "Created source archive $PT_RELEASE_FILE with content: $(ls -a "$PT_RELEASE_NAME")"
       - name: Upload source distribution
         if: ${{ github.event_name == 'release' }}
         uses: softprops/action-gh-release@v1
