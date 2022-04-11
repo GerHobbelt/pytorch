@@ -43,7 +43,7 @@ runs:
     - name: Checkout PyTorch
       uses: clee2000/checkout@fetch-depth
       with:
-        ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        ref: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'push' && github.event.base_ref) || github.sha }}
         # deep clone, to allow use of git merge-base
-        fetch-depth: ${{ github.event_name == 'pull_request' && github.event.pull_request.commits || github.event.commits.length || 100 }}
+        fetch-depth: ${{ (github.event_name == 'pull_request' && github.event.pull_request.commits) || (github.event_name == 'push' && -1) || 100 }}
         submodules: recursive
