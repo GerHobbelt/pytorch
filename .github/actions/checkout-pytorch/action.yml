@@ -26,7 +26,7 @@ runs:
     - name: echo
       shell: bash
       env:
-        THING: ${{ github.event }}
+        THING: ${{ toJSON(github.event) }}
       run: echo "$THING"
     - name: Checkout PyTorch
       uses: clee2000/checkout@fetch-depth
