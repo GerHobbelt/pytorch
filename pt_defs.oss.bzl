@@ -1,12 +1,14 @@
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("//tools/build_defs:fb_xplat_genrule.bzl", "fb_xplat_genrule")
-load("//tools/build_defs:type_defs.bzl", "is_list", "is_string")
+load(
+    ":buckbuild.bzl",
+    "gen_aten_files",
+)
 load(":build_variables.bzl", "aten_native_source_list")
 load(
     ":ufunc_defs.bzl",
     "aten_ufunc_generated_cpu_kernel_sources",
     "aten_ufunc_generated_cpu_sources",
-    "aten_ufunc_generated_cuda_sources",
 )
 
 USED_PT_BACKENDS = [
@@ -268,114 +270,6 @@ def get_static_dispatch_backend():
         return []
     return static_dispatch_backend.split(";")
 
-def get_aten_codegen_extra_params(backends):
-    if get_build_from_deps_query():
-        extra_params = {
-            "force_schema_registration": True,
-        }
-        static_backends = get_static_dispatch_backend()
-        if static_backends:
-            extra_params["static_dispatch_backend"] = static_backends
-            extra_params["enabled_backends"] = static_backends
-        else:
-            extra_params["enabled_backends"] = backends
-        return extra_params
-    else:
-        return {}
-
-def gen_aten_files(
-        name,
-        extra_flags = {},
-        visibility = [],
-        compatible_with = []):
-    extra_params = []
-    force_schema_registration = extra_flags.get("force_schema_registration", False)
-    op_registration_allowlist = extra_flags.get("op_registration_allowlist", None)
-    op_selection_yaml_path = extra_flags.get("op_selection_yaml_path", None)
-    enabled_backends = extra_flags.get("enabled_backends", None)
-    static_dispatch_backend = extra_flags.get("static_dispatch_backend", None)
-
-    if force_schema_registration:
-        extra_params.append("--force_schema_registration")
-    if op_registration_allowlist != None and is_string(op_registration_allowlist):
-        extra_params.append("--op_registration_whitelist")
-        extra_params.append(op_registration_allowlist)
-    if op_selection_yaml_path != None and is_string(op_selection_yaml_path):
-        extra_params.append("--op_selection_yaml_path")
-        extra_params.append(op_selection_yaml_path)
-    if enabled_backends != None and is_list(enabled_backends):
-        extra_params.append("--backend_whitelist")
-        extra_params.extend(enabled_backends)
-    if get_enable_lightweight_dispatch():
-        extra_params.append("--skip_dispatcher_op_registration")
-    if static_dispatch_backend:
-        extra_params.append("--static_dispatch_backend")
-        extra_params.extend(static_dispatch_backend)
-        backends = static_dispatch_backend
-    else:
-        backends = enabled_backends
-    fb_xplat_genrule(
-        name = name,
-        default_outs = ["."],
-        outs = get_aten_generated_files(backends),
-        cmd = "$(exe //torchgen:gen) " + " ".join([
-            "--source-path $(location //:aten_src_path)/aten/src/ATen",
-            "--install_dir $OUT",
-        ] + extra_params),
-        visibility = visibility,
-        compatible_with = compatible_with,
-    )
-
-def get_aten_generated_files(enabled_backends):
-    # NB: RegisterMeta counts as an optionally enabled backend,
-    # and is intentionally omitted from here
-    src_files = [
-        "RegisterBackendSelect.cpp",
-        "RegisterCompositeImplicitAutograd.cpp",
-        "RegisterCompositeExplicitAutograd.cpp",
-        "CompositeViewCopyKernels.cpp",
-        "RegisterSchema.cpp",
-        "Declarations.yaml",
-        "Functions.cpp",
-        "Functions.h",
-        "RedispatchFunctions.h",
-        "NativeFunctions.h",
-        "NativeMetaFunctions.h",
-        "MethodOperators.h",
-        "FunctionalInverses.h",
-        "Operators.h",
-        "Operators_0.cpp",
-        "Operators_1.cpp",
-        "Operators_2.cpp",
-        "Operators_3.cpp",
-        "Operators_4.cpp",
-        "CompositeImplicitAutogradFunctions.h",
-        "CompositeImplicitAutogradFunctions_inl.h",
-        "CompositeExplicitAutogradFunctions.h",
-        "CompositeExplicitAutogradFunctions_inl.h",
-        "core/ATenOpList.cpp",
-        "core/TensorBody.h",
-        "core/TensorMethods.cpp",
-        "core/aten_interned_strings.h",
-    ] + get_aten_derived_type_srcs(enabled_backends)
-
-    # This is tiresome.  A better strategy would be to unconditionally
-    # generate these files, and then only actually COMPILE them depended
-    # on the generated set.  C'est la vie...
-    if "CPU" in enabled_backends:
-        src_files.extend(aten_ufunc_generated_cpu_sources())
-        src_files.extend(aten_ufunc_generated_cpu_kernel_sources())
-    if "CUDA" in enabled_backends:
-        # Cannot unconditionally include this, because in the Edge selective
-        # build CUDA is not enabled and thus the ufunc codegen for CUDA gets
-        # skipped
-        src_files.extend(aten_ufunc_generated_cuda_sources())
-
-    res = {}
-    for file_name in src_files:
-        res[file_name] = [file_name]
-    return res
-
 def get_template_registration_file_rules(rule_name):
     rules = []
     for file_path in TEMPLATE_SOURCE_LIST:
@@ -524,20 +418,6 @@ def get_aten_selective_cpp_rules(aten_rule_name, enabled_backends):
         ":{}[{}]".format(aten_rule_name, f)
         for f in ["RegisterCompositeImplicitAutograd.cpp", "RegisterCompositeExplicitAutograd.cpp", "RegisterSchema.cpp", "RegisterBackendSelect.cpp", "CompositeViewCopyKernels.cpp"]
     ] + get_aten_derived_type_src_rules(aten_rule_name, enabled_backends)
-
-def get_aten_derived_type_srcs(enabled_backends):
-    return [
-        "Register" + derived_type + ".cpp"
-        for derived_type in enabled_backends
-    ] + [
-        derived_type + "Functions.h"
-        for derived_type in enabled_backends
-        if derived_type in PT_BACKEND_HEADERS or derived_type in get_static_dispatch_backend()
-    ] + [
-        derived_type + "Functions_inl.h"
-        for derived_type in enabled_backends
-        if derived_type in PT_BACKEND_HEADERS or derived_type in get_static_dispatch_backend()
-    ]
 
 def pt_operator_query_codegen(name, deps = [], train = False, enforce_traced_op_list = False, pt_allow_forced_schema_registration = True, compatible_with = []):
     oplist_dir_name = name + "_pt_oplist"
