@@ -388,7 +388,7 @@ static void check_from_to_in_range(int64_t from, int64_t to_inc, ScalarType scal
 Tensor& random_mps_
   (Tensor& self,
    int64_t from,
-   optional<int64_t> to_opt,
+   c10::optional<int64_t> to_opt,
    c10::optional<Generator> gen) {
 
   using namespace mps;
