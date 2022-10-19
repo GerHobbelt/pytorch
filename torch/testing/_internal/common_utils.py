@@ -716,11 +716,7 @@ def run_tests(argv=UNITTEST_ARGS):
 
     if TEST_IN_SUBPROCESS:
         failed_tests = []
-        test_cases = discover_test_cases_recursively(suite)
-        print(f"there are {len(test_cases)} unitest tests in {argv[0]}")
-        a = count_pytest_test_cases(argv[0])
-        if USE_PYTEST:
-            print(f"there are {len(a)} pytest tests in {argv[0]}")
+        test_cases = count_pytest_test_cases(argv[0])
         for case in test_cases:
             test_case_full_name = case.id().split('.', 1)[1]
             other_args = []
@@ -728,10 +724,10 @@ def run_tests(argv=UNITTEST_ARGS):
                 other_args.append('--import-disabled-tests')
             if SLOW_TESTS_FILE:
                 other_args.append('--import-slow-tests')
+            cmd = [sys.executable] + [argv[0]] + other_args + argv[1:] + [test_case_full_name]
             if USE_PYTEST:
                 other_args.append('--use-pytest')
-                test_case_full_name = f"-k={test_case_full_name.split('.')[1]}"
-            cmd = [sys.executable] + [argv[0]] + other_args + argv[1:] + [test_case_full_name]
+                cmd = [sys.executable] + [case] + other_args + argv[1:]
             print(cmd)
             string_cmd = " ".join(cmd)
             exitcode = shell(cmd)
