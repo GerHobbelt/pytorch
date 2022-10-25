@@ -11,13 +11,8 @@ from typing import Tuple
 
 from torch.distributed.logging_handlers import _log_handlers
 
-_c10d_error_logger = None
-
 
 def _get_or_create_logger() -> logging.Logger:
-    global _c10d_error_logger
-    if _c10d_error_logger:
-        return _c10d_error_logger
     logging_handler, log_handler_name = _get_logging_handler()
     _c10d_error_logger = logging.getLogger(f"c10d-collectives-{log_handler_name}")
     _c10d_error_logger.setLevel(logging.DEBUG)
