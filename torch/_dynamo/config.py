@@ -25,7 +25,7 @@ except ImportError:
 # logging.WARN print warnings (including graph breaks)
 # logging.ERROR print exceptions (and what user code was being processed when it occurred)
 # NOTE: changing log_level will automatically update the levels of all torchdynamo loggers
-log_level = logging.WARNING
+log_level = logging.DEBUG
 
 # the name of a file to write the logs to
 log_file_name = None
@@ -88,7 +88,7 @@ suppress_errors = bool(os.environ.get("TORCHDYNAMO_SUPPRESS_ERRORS", False))
 replay_record_enabled = False
 
 # Show a warning on every graph break
-print_graph_breaks = False
+print_graph_breaks = True
 
 # If a PyTorch module is in this allowlist, torchdynamo will be allowed
 # to inline objects from it or its children.

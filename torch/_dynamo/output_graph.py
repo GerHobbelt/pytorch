@@ -204,7 +204,7 @@ class OutputGraph(fx.Tracer):
         Automatically restore live variables.
         """
         from .eval_frame import disable
-
+        print(f"compile_subgraph, reason={reason}")
         self.partial_convert = partial_convert
         self.compile_subgraph_reason = reason
 
@@ -363,8 +363,11 @@ class OutputGraph(fx.Tracer):
                 "install tabulate` to install the library."
             )
 
+        print("calling pycodegen(tx)")
         cg = PyCodegen(tx)
+        print(f"calling make_call_generated_code({name})")
         cg.make_call_generated_code(name)
+        print("calling get_instructions()")
         return cg.get_instructions()
 
     def call_user_compiler(self, gm):

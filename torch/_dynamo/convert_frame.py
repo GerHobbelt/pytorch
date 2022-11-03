@@ -270,12 +270,14 @@ def convert_frame_assert(
     compiler_fn: Callable, guard_export_fn=None, one_graph=True, export=False
 ):
     """Fully convert a frame into an FX graph"""
+    print("convert_frame_assert")
     init_logging()
 
     compiler_fn = wrap_compiler_fn(compiler_fn)
 
     @dynamo_timed
     def _convert_frame_assert(frame: types.FrameType, cache_size: int):
+        print(f"convert_frame_assert, {frame}")
         code = frame.f_code
         input_codes.add(code)
         if code in output_codes:
@@ -335,7 +337,7 @@ def convert_frame_assert(
 
         global initial_grad_state
         initial_grad_state = torch.is_grad_enabled()
-
+        print("convert_frame_assert: _compile()")
         return _compile(
             frame.f_code,
             frame.f_globals,
@@ -391,14 +393,17 @@ def _compile(
     try:
         for attempt in itertools.count():
             try:
+                print(f"transform attempt {attempt}")
                 out_code = transform_code_object(code, transform)
                 orig_code_map[out_code] = code
                 break
             except exc.RestartAnalysis:
+                print(f"transform attempt {attempt} restart")
                 log.debug("Restarting analysis ...")
                 if attempt > 100:
                     unimplemented("100+ RestartAnalysis() calls")
             except exc.SkipFrame:
+                print(f"transform attempt {attempt} skip")
                 log.debug(
                     f"Skipping frame {code.co_name} \
                     {code.co_filename} {code.co_firstlineno}"
@@ -442,6 +447,7 @@ def _compile(
         if guard_export_fn is not None:
             guard_export_fn(output.guards)
 
+        print("return guarded code")
         return guarded_code
     except (
         Unsupported,
@@ -449,9 +455,11 @@ def _compile(
         BackendCompilerFailed,
         AssertionError,
     ) as e:
+        print(f"handled exception in _compile {e}")
         exception_handler(e, code, frame)
         raise
     except Exception as e:
+        print(f"Exception in _compile {e}")
         exception_handler(e, code, frame)
         raise InternalTorchDynamoError() from e
 

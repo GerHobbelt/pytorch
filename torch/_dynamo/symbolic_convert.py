@@ -174,6 +174,7 @@ def break_graph_if_unsupported(*, push):
                 return inner_fn(self, inst)
             except Unsupported as exc:
                 if not self.should_compile_partial_graph():
+                    print(f"break_graph_if_unsupported: {exc}")
                     raise
                 user_stack = [self.frame_summary()] + list(reversed(exc.real_stack))
                 user_stack_formatted = "".join(traceback.format_list(user_stack))
@@ -1534,6 +1535,7 @@ class InliningInstructionTranslator(InstructionTranslatorBase):
 
         if func.get_name() == "patched_init":
             unimplemented("Patched init cannot be inlined.")
+        # TODO (whc) clean up patched_init stuff
 
         try:
             if id(func.get_function()) in allowed_functions._disallowed_function_ids:

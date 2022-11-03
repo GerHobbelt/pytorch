@@ -173,6 +173,7 @@ def standard_test(self, fn, nargs, expected_ops=None, expected_ops_dynamic=None)
             gm.graph.print_tabular()
             expected_ops = expected.op_count
         except Exception:
+            print("Failed to fx trace")
             pass  # Silently ignore FX errors (not our issue)
 
     args1 = [torch.randn(10, 10) for _ in range(nargs)]
@@ -180,10 +181,20 @@ def standard_test(self, fn, nargs, expected_ops=None, expected_ops_dynamic=None)
     correct1 = fn(*args1)
     correct2 = fn(*args2)
     reset()
+    def printt(x):
+        print(f"=====================\n{x}\n=====================")
+    printt("call compiler")
     opt_fn = optimize_assert(actual)(fn)
+    printt(f"expected_ops: {expected_ops}")
+    printt(f"actual_ops: {actual.op_count}")
+    
+    printt("call opt_fn 1")
     val1a = opt_fn(*args1)
+    printt("call opt_fn 2")
     val2a = opt_fn(*args2)
+    printt("call opt_fn 3")
     val1b = opt_fn(*args1)
+    printt("call opt_fn 4")
     val2b = opt_fn(*args2)
     reset()
     self.assertTrue(same(val1a, correct1))

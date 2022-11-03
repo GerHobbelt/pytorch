@@ -118,6 +118,7 @@ class _TorchDynamoContext:
         # Optimize the forward method of torch.nn.Module object
         if isinstance(fn, torch.nn.Module):
             mod = fn
+            print("__call__ optimizing module")
             optimized_forward = self(mod.forward)
 
             class TorchDynamoNNModuleWrapper:
@@ -140,6 +141,7 @@ class _TorchDynamoContext:
             # Save the function pointer to find the original callable while nesting
             # of decorators.
             new_mod._torchdynamo_orig_callable = mod
+            print("returning new_mod to user")
             return new_mod
 
         assert callable(fn)
@@ -149,6 +151,7 @@ class _TorchDynamoContext:
 
         @functools.wraps(fn)
         def _fn(*args, **kwargs):
+            print("_fn entering")
             on_enter()
             prior = set_eval_frame(callback)
             backend_ctx = backend_ctx_ctor()
@@ -174,6 +177,7 @@ class _TorchDynamoContext:
         if callback not in (None, False):
             always_optimize_code_objects[fn.__code__] = True
 
+        print("ctx returning _fn to user")
         return _fn
 
 
@@ -187,7 +191,7 @@ class OptimizeContext(_TorchDynamoContext):
             ):
                 raise ResetRequired()
             most_recent_backend = compiler_fn
-            install_generation_tagging_init()
+            # install_generation_tagging_init()
 
         compiler_fn = innermost_fn(callback)
         super().__init__(
@@ -212,10 +216,13 @@ class DisableContext(_TorchDynamoContext):
 def catch_errors_wrapper(callback):
     @functools.wraps(callback)
     def catch_errors(frame, cache_size):
+        print("catch_errors entering")
         if frame.f_lasti >= 0 or skipfiles.check(frame.f_code.co_filename):
+            print("catch_errors skipping")
             log.debug(f"skipping {frame.f_code.co_name} {frame.f_code.co_filename}")
             return None
         if frame.f_code.co_filename == "<string>" and frame.f_code.co_name == "__new__":
+            print("catch_errors skipping string__new__")
             # nametuple constructor
             return None
         if config.optimize_ddp:
@@ -233,6 +240,7 @@ def catch_errors_wrapper(callback):
                     return hijacked_callback(frame, cache_size)
 
         with compile_lock:
+            print("catch_errors calling callback")
             return callback(frame, cache_size)
 
     catch_errors._torchdynamo_orig_callable = callback
@@ -240,6 +248,7 @@ def catch_errors_wrapper(callback):
 
 
 def _optimize_catch_errors(compile_fn, backend_ctx_ctor=null_context):
+    print("_optimize_catch_errors")
     return OptimizeContext(
         catch_errors_wrapper(compile_fn),
         backend_ctx_ctor=backend_ctx_ctor,
@@ -585,7 +594,7 @@ def optimize_assert(backend, *, guard_export_fn=None, export=False):
 
     # Find if backend has any extra context manager
     backend_ctx_ctor = getattr(backend, "backend_ctx_ctor", null_context)
-
+    print("optimize_assert")
     return _optimize_catch_errors(
         convert_frame.convert_frame_assert(backend, guard_export_fn, export=export),
         backend_ctx_ctor,
@@ -655,6 +664,10 @@ class TorchPatcher:
             DistributedDataParallel._inside_ddp_forward = skip(
                 DistributedDataParallel._inside_ddp_forward
             )
+
+        from torch.nn import ModuleList
+        # ModuleList.__getitem__ = skip(ModuleList.__getitem__)
+        # ModuleList.__init__ = skip(ModuleList.__init__)
 
         # disable profile hook
         for opt in optimizers:
