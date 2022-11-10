@@ -3,11 +3,14 @@ import logging
 import math
 import numbers
 
+import time
+
 import torch
 import torch._decomp as decomp
 from torch import Tensor
 from torch._decomp import get_decompositions
 from torch._prims_common import is_boolean_dtype, is_integer_dtype
+from torch.utils._mode_utils import no_dispatch
 
 from . import config
 
@@ -135,6 +138,26 @@ def floordiv(a, b):
     return aten.div.Tensor_mode(a, b, rounding_mode="floor")
 
 
+def get_padded_length(x):
+    if x % config.alignment_size == 0:
+        return 0
+    return int((x // config.alignment_size + 1) * config.alignment_size) - x
+
+
+def pad_dim(x, padded_length, dim):
+    pad = x.new_zeros(*x.shape[:dim], padded_length, *x.shape[dim + 1 :])
+    return torch.cat([x, pad], dim=dim)
+
+
+def check_device_dtype(a: Tensor, b: Tensor):
+    return (
+        a.is_cuda
+        and b.is_cuda
+        and a.dtype == torch.float32
+        and b.dtype == torch.float32
+    )
+
+
 @register_decomposition([aten.addmm])
 def addmm(input, mat1, mat2, *, beta=1, alpha=1):
     if config.triton.mm != "aten":
@@ -144,8 +167,138 @@ def addmm(input, mat1, mat2, *, beta=1, alpha=1):
         if not isinstance(beta, numbers.Number) or beta != 1:
             input = input * beta
         return input + out
-    else:
-        return NotImplemented  # go directly to lowering
+
+    if (
+        config.shape_padding
+        and check_device_dtype(mat1, mat2)
+        and should_pad_bench(mat1, mat2, torch.ops.aten.addmm, input=input)
+    ):
+
+        k_padded_length = get_padded_length(mat1.shape[1])
+        n_padded_length = get_padded_length(mat2.shape[1])
+
+        if k_padded_length != 0:
+            mat1 = pad_dim(mat1, k_padded_length, 1)
+            mat2 = pad_dim(mat2, k_padded_length, 0)
+        if n_padded_length != 0:
+            if input is not None and input.is_cuda and input.dtype == torch.float32:
+                if input.dim() == 2:
+                    input = pad_dim(input, n_padded_length, 1)
+                elif input.dim() == 1:
+                    input = pad_dim(input, n_padded_length, 0)
+
+                mat2 = pad_dim(mat2, n_padded_length, 1)
+                return torch.ops.aten.addmm(input, mat1, mat2, beta=beta, alpha=alpha)[
+                    :, :-(n_padded_length)
+                ]
+        elif k_padded_length != 0:
+            return torch.ops.aten.addmm(input, mat1, mat2, beta=beta, alpha=alpha)
+
+    return NotImplemented  # go directly to lowering
+
+
+def bench(f, name=None, iters=100, warmup=5, display=False):
+    for _ in range(warmup):
+        f()
+    torch.cuda.synchronize()
+    begin = time.time()
+    for _ in range(iters):
+        f()
+    torch.cuda.synchronize()
+    us_per_iter = (time.time() - begin) * 1e6 / iters
+    if display:
+        if name is None:
+            print(f"{us_per_iter}us")
+        else:
+            print(f"{name}: {us_per_iter}us")
+    return us_per_iter
+
+
+def should_pad_bench(mat1, mat2, op, input=None):
+    with no_dispatch():
+        mat1 = torch.randn_like(mat1)
+        mat2 = torch.randn_like(mat2)
+        if op is torch.ops.aten.bmm or op is torch.ops.aten.mm:
+            ori_time = bench(lambda: op(mat1, mat2))
+        elif op is torch.ops.aten.addmm:
+            input = torch.randn_like(input)
+            ori_time = bench(lambda: op(input, mat1, mat2))
+        else:
+            return False
+
+        if op is torch.ops.aten.mm or op is torch.ops.aten.addmm:
+            mat1_pad = pad_dim(mat1, get_padded_length(mat1.shape[1]), 1)
+            mat2_pad = mat2.new_empty([get_padded_length(i) + i for i in mat2.shape])
+            if op is torch.ops.aten.addmm:
+                if input is not None:
+                    if input.dim() == 2:
+                        input_pad = pad_dim(input, get_padded_length(input.shape[1]), 1)
+                    elif input.dim() == 1:
+                        input_pad = pad_dim(input, get_padded_length(input.shape[0]), 0)
+                pad_time = bench(lambda: op(input_pad, mat1_pad, mat2_pad))
+            else:
+                pad_time = bench(lambda: op(mat1_pad, mat2_pad))
+        elif op is torch.ops.aten.bmm:
+            mat1_pad = pad_dim(mat1, get_padded_length(mat1.shape[2]), 2)
+            mat2_pad = mat2.new_empty(
+                mat2.shape[0],
+                get_padded_length(mat2.shape[1]) + mat2.shape[1],
+                get_padded_length(mat2.shape[2]) + mat2.shape[2],
+            )
+            pad_time = bench(lambda: op(mat1_pad, mat2_pad))
+        else:
+            return False
+
+        # Shape padding introduces addtional memory ops. Based on microbenchmarks, 1.4x represents a reasonable
+        # tradeoff between performance improvement from shape padding and overhead from addtional memory ops
+        # TODO: Build a learned model which would be better than this heuristic
+        return ori_time > pad_time * 1.4
+
+
+@register_decomposition([aten.mm])
+def mm_decomp(mat1, mat2):
+    if (
+        config.shape_padding
+        and check_device_dtype(mat1, mat2)
+        and should_pad_bench(mat1, mat2, torch.ops.aten.mm)
+    ):
+
+        k_padded_length = get_padded_length(mat1.shape[1])
+        n_padded_length = get_padded_length(mat2.shape[1])
+
+        if k_padded_length != 0:
+            mat1 = pad_dim(mat1, k_padded_length, 1)
+            mat2 = pad_dim(mat2, k_padded_length, 0)
+        if n_padded_length != 0:
+            mat2 = pad_dim(mat2, n_padded_length, 1)
+            return torch.ops.aten.mm(mat1, mat2)[:, :-n_padded_length]
+        elif k_padded_length != 0:
+            return torch.ops.aten.mm(mat1, mat2)
+
+    return NotImplemented  # go directly to lowering
+
+
+@register_decomposition([aten.bmm])
+def bmm_decomp(mat1, mat2):
+    if (
+        config.shape_padding
+        and check_device_dtype(mat1, mat2)
+        and should_pad_bench(mat1, mat2, torch.ops.aten.bmm)
+    ):
+
+        k_padded_length = get_padded_length(mat1.shape[2])
+        n_padded_length = get_padded_length(mat2.shape[2])
+
+        if k_padded_length != 0:
+            mat1 = pad_dim(mat1, k_padded_length, 2)
+            mat2 = pad_dim(mat2, k_padded_length, 1)
+        if n_padded_length != 0:
+            mat2 = pad_dim(mat2, n_padded_length, 2)
+            return torch.ops.aten.bmm(mat1, mat2)[:, :, :-n_padded_length].contiguous()
+        elif k_padded_length != 0:
+            return torch.ops.aten.bmm(mat1, mat2)
+
+    return NotImplemented  # go directly to lowering
 
 
 @register_decomposition([aten.rsqrt])
