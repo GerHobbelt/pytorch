@@ -2765,7 +2765,6 @@ def upsample_bicubic2d_vec(
 def register_inplace(aten_op, outplace_op, shape_preserving=None):
     @register_decomposition(aten_op, shape_preserving=shape_preserving)
     def inplace_op(*args, **kwargs):
-        breakpoint()
         out = outplace_op(*args, **kwargs)
         return args[0].copy_(out)
 

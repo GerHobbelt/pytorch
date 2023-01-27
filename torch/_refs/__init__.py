@@ -13,7 +13,7 @@ import torch
 
 import torch._prims as prims
 import torch._prims_common as utils
-from torch import sym_float, sym_int, SymInt
+from torch import sym_float, sym_int, SymFloat, SymInt
 from torch._prims_common import (
     check,
     DeviceLikeType,
@@ -1534,9 +1534,9 @@ def minimum(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType:
 
 
 def shape_preserving_mul_custom(*args, **kwargs):
-    if isinstance(args[1], (int, float, SymInt)):
+    if isinstance(args[1], (int, float, SymInt, SymFloat)):
         return args[0]
-    if isinstance(args[0], (int, float, SymInt)):
+    if isinstance(args[0], (int, float, SymInt, SymFloat)):
         return args[1]
     if args[0].shape == args[1].shape:
         return FakeTensor(
