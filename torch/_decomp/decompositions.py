@@ -11,7 +11,7 @@ import torch._prims as prims
 import torch._prims_common as utils
 import torch.nn.functional as F
 from torch import sym_float, sym_int, Tensor
-from torch._decomp import register_decomposition
+from torch._decomp import register_decomposition, shape_preserving_default
 from torch._prims_common import IntLike, NumberType, TensorLike, TensorSequenceType
 from torch._prims_common.wrappers import (
     _maybe_convert_to_dtype,
@@ -20,6 +20,7 @@ from torch._prims_common.wrappers import (
     out_wrapper,
 )
 from torch.fx.experimental.symbolic_shapes import guard_int
+from torch.utils._mode_utils import no_dispatch
 from torch.utils._pytree import tree_flatten, tree_map
 
 DispatchKey = torch._C.DispatchKey  # type: ignore[attr-defined]
@@ -2761,9 +2762,10 @@ def upsample_bicubic2d_vec(
     return upsample_bicubic2d_default(a, output_size, align_corners, scale_h, scale_w)
 
 
-def register_inplace(aten_op, outplace_op):
-    @register_decomposition(aten_op)
+def register_inplace(aten_op, outplace_op, shape_preserving=None):
+    @register_decomposition(aten_op, shape_preserving=shape_preserving)
     def inplace_op(*args, **kwargs):
+        breakpoint()
         out = outplace_op(*args, **kwargs)
         return args[0].copy_(out)
 
@@ -2784,7 +2786,7 @@ register_inplace(aten.index_put_, aten.index_put)
 register_inplace(aten.index_reduce_, aten.index_reduce)
 register_inplace(aten.leaky_relu_, aten.leaky_relu)
 register_inplace(aten.logit_, aten.logit)
-register_inplace(aten.relu_, aten.relu)
+register_inplace(aten.relu_, aten.relu, shape_preserving=shape_preserving_default)
 register_inplace(aten.renorm_, aten.renorm)
 register_inplace(aten.round_, aten.round)
 register_inplace(aten.scatter_, aten.scatter)

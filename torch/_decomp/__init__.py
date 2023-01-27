@@ -7,6 +7,7 @@ from typing import Callable, Dict, Sequence, Union
 import torch
 import torch.library
 from torch._ops import OpOverload, OpOverloadPacket
+from torch._subclasses import FakeTensor
 from torch.utils._pytree import tree_map
 
 __all__ = [
@@ -27,7 +28,7 @@ pre_autograd_decomposition_table = global_decomposition_table["pre_autograd"]
 meta_table = global_decomposition_table["meta"]
 
 
-def _add_op_to_registry(registry, op, fn):
+def _add_op_to_registry(registry, op, fn, shape_preserving=None):
     """
     This is an internal API for adding an op to the decomposition table.
 
@@ -50,10 +51,26 @@ def _add_op_to_registry(registry, op, fn):
         # which don't have corresponding dispatcher entries, we need
         # to filter those out, e.g aten.add.float_int
         if torch._C._dispatch_has_kernel(op_overload.name()):
+            fn.shape_preserving = shape_preserving
             registry[op_overload] = fn
 
 
-def register_decomposition(aten_op, registry=None, *, type="post_autograd"):
+def shape_preserving_default(*args, **kwargs):
+    if len(kwargs) != 0:
+        return None
+
+    t = next((x for x in args if isinstance(x, torch.Tensor)), None)
+    if t is not None:
+        return FakeTensor(
+            t.fake_mode, torch.empty(t.shape, device="meta"), device=t.device
+        )
+
+    return None
+
+
+def register_decomposition(
+    aten_op, registry=None, *, type="post_autograd", shape_preserving=None
+):
     """
     A decorator to register a function as a decomposition to the Python
     decomposition table.  Use it like this::
@@ -124,7 +141,7 @@ def register_decomposition(aten_op, registry=None, *, type="post_autograd"):
             registry = global_decomposition_table[type]
 
         def register(op):
-            _add_op_to_registry(registry, op, fn)
+            _add_op_to_registry(registry, op, fn, shape_preserving)
 
         # To handle allowing multiple aten_ops at once
         tree_map(register, aten_op)
@@ -149,7 +166,6 @@ def get_decompositions(
     not in this set.
     """
     assert type in {"post_autograd", "pre_autograd", "meta"}
-
     registry = global_decomposition_table[type]
     packets_to_overloads = defaultdict(list)
     for opo in registry:

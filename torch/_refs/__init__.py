@@ -13,7 +13,7 @@ import torch
 
 import torch._prims as prims
 import torch._prims_common as utils
-from torch import sym_float, sym_int
+from torch import sym_float, sym_int, SymInt
 from torch._prims_common import (
     check,
     DeviceLikeType,
@@ -43,6 +43,8 @@ from torch._prims_common.wrappers import (
     elementwise_unary_scalar_wrapper,
     out_wrapper,
 )
+from torch._subclasses.fake_tensor import FakeTensor
+from torch.utils._mode_utils import no_dispatch
 
 # Experimental module containing prototype Python references for existing
 #   PyTorch operations.
@@ -366,7 +368,7 @@ def _maybe_broadcast(*args, preserve_cpu_scalar_tensors=True):
 
 
 # Utilities should come BEFORE this import
-from torch._decomp import register_decomposition
+from torch._decomp import register_decomposition, shape_preserving_default
 
 #
 # Elementwise unary references
@@ -380,6 +382,7 @@ def _make_elementwise_unary_reference(
     *,
     aten_op=infer_aten_op,
     extra_meta=None,
+    shape_preserving=None,
 ) -> Callable:
     def inner(prim: Callable):
         nonlocal aten_op
@@ -400,7 +403,7 @@ def _make_elementwise_unary_reference(
         if aten_op is infer_aten_op:
             aten_op = utils.get_aten_op(prim, prim.__name__)
         if aten_op is not None:
-            register_decomposition(aten_op)(_ref)
+            register_decomposition(aten_op, shape_preserving=shape_preserving)(_ref)
 
         return _ref
 
@@ -420,7 +423,7 @@ def _make_alias(fn, name):
     return _fn
 
 
-def _make_inplace(fn):
+def _make_inplace(fn, shape_preserving=None):
     """
     Given a function with out variant (i.e. using `out_wrapper()), it returns its in-place variant
     See https://github.com/pytorch/pytorch/wiki/Developer-FAQ#how-do-in-place-operations-work-in-pytorch
@@ -433,7 +436,9 @@ def _make_inplace(fn):
 
     inplace_name = f"{fn.__name__}_"
     _fn.__name__ = inplace_name
-    _fn = register_decomposition(getattr(aten, inplace_name))(_fn)
+    _fn = register_decomposition(
+        getattr(aten, inplace_name), shape_preserving=shape_preserving
+    )(_fn)
 
     # We access the __all__ attribute of the module where fn is defined
     # There may be a cleaner way of doing this...
@@ -485,7 +490,9 @@ def bitwise_not(a):
     return prims.bitwise_not(a)
 
 
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT)
+@_make_elementwise_unary_reference(
+    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, shape_preserving=shape_preserving_default
+)
 def ceil(a):
     return prims.ceil(a)
 
@@ -571,13 +578,15 @@ def fill_(a: TensorLikeType, value: NumberType) -> TensorLikeType:
     return a
 
 
-@register_decomposition(aten.zero)
+@register_decomposition(aten.zero, shape_preserving=shape_preserving_default)
 @out_wrapper()
 def zero(input: TensorLikeType) -> TensorLikeType:
     return torch.zeros_like(input)
 
 
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT)
+@_make_elementwise_unary_reference(
+    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, shape_preserving=shape_preserving_default
+)
 def floor(a):
     return prims.floor(a)
 
@@ -888,6 +897,7 @@ def _make_elementwise_binary_reference(
     supports_lhs_python_scalar=True,
     supports_rhs_python_scalar=True,
     supports_two_python_scalars=False,
+    shape_preserving=None,
 ) -> Callable:
     def inner(prim: Callable):
         nonlocal aten_op, name
@@ -931,7 +941,7 @@ def _make_elementwise_binary_reference(
         if aten_op is infer_aten_op:
             aten_op = utils.get_aten_op(prim, name)
         if aten_op is not None:
-            register_decomposition(aten_op)(_ref)
+            register_decomposition(aten_op, shape_preserving=shape_preserving)(_ref)
 
         return _ref
 
@@ -939,7 +949,7 @@ def _make_elementwise_binary_reference(
 
 
 # Add has its own implementation because it has an alpha argument
-@register_decomposition(aten.add)
+@register_decomposition(aten.add, shape_preserving=shape_preserving_default)
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a", "b"),
@@ -1170,6 +1180,7 @@ def float_power(
 @_make_elementwise_binary_reference(
     type_promotion_kind=utils.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
     supports_two_python_scalars=True,
+    shape_preserving=shape_preserving_default,
 )
 def floor_divide(
     a: Union[TensorLikeType, NumberType], b: Union[TensorLikeType, NumberType]
@@ -1522,10 +1533,25 @@ def minimum(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType:
     return prims.minimum(a, b)
 
 
+def shape_preserving_mul_custom(*args, **kwargs):
+    if isinstance(args[1], (int, float, SymInt)):
+        return args[0]
+    if isinstance(args[0], (int, float, SymInt)):
+        return args[1]
+    if args[0].shape == args[1].shape:
+        return FakeTensor(
+            args[0].fake_mode,
+            torch.empty(args[0].shape, device="meta"),
+            device=args[0].device,
+        )
+    return None
+
+
 # TODO: add docstring
 @_make_elementwise_binary_reference(
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
     supports_two_python_scalars=True,
+    shape_preserving=shape_preserving_mul_custom,
 )
 def mul(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType:
     return prims.mul(a, b)
@@ -1574,7 +1600,7 @@ def rsub(
 # TODO: add docstring
 # TODO: consider refactoring this with add impl
 # sub has its own implementation because it has an alpha argument
-@register_decomposition(aten.sub)
+@register_decomposition(aten.sub, shape_preserving=shape_preserving_default)
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a", "b"),
@@ -5194,8 +5220,8 @@ def exponential(self, rate=1, generator=None):
 abs_ = _make_inplace(abs)
 acos_ = _make_inplace(acos)
 acosh_ = _make_inplace(acosh)
-add_ = _make_inplace(add)
-addcmul_ = _make_inplace(addcmul)
+add_ = _make_inplace(add, shape_preserving=shape_preserving_default)
+addcmul_ = _make_inplace(addcmul, shape_preserving=shape_preserving_mul_custom)
 addcdiv_ = _make_inplace(addcdiv)
 asin_ = _make_inplace(asin)
 asinh_ = _make_inplace(asinh)
@@ -5208,13 +5234,13 @@ bitwise_not_ = _make_inplace(bitwise_not)
 bitwise_or_ = _make_inplace(bitwise_or)
 bitwise_right_shift_ = _make_inplace(bitwise_right_shift)
 bitwise_xor_ = _make_inplace(bitwise_xor)
-ceil_ = _make_inplace(ceil)
-clamp_ = _make_inplace(clamp)
+ceil_ = _make_inplace(ceil, shape_preserving=shape_preserving_default)
+clamp_ = _make_inplace(clamp, shape_preserving=shape_preserving_default)
 clamp_min_ = _make_inplace(clamp_min)
 clamp_max_ = _make_inplace(clamp_max)
 conj_physical_ = _make_inplace(conj_physical)
 copysign_ = _make_inplace(copysign)
-cos_ = _make_inplace(cos)
+cos_ = _make_inplace(cos, shape_preserving=shape_preserving_default)
 cosh_ = _make_inplace(cosh)
 cumsum_ = _make_inplace(cumsum)
 digamma_ = _make_inplace(digamma)
@@ -5227,8 +5253,8 @@ exp_ = _make_inplace(exp)
 exp2_ = _make_inplace(exp2)
 expm1_ = _make_inplace(expm1)
 float_power_ = _make_inplace(float_power)
-floor_ = _make_inplace(floor)
-floor_divide_ = _make_inplace(floor_divide)
+floor_ = _make_inplace(floor, shape_preserving=shape_preserving_default)
+floor_divide_ = _make_inplace(floor_divide, shape_preserving=shape_preserving_default)
 fmod_ = _make_inplace(fmod)
 frac_ = _make_inplace(frac)
 gcd_ = _make_inplace(gcd)
@@ -5252,11 +5278,11 @@ logical_not_ = _make_inplace(logical_not)
 logical_or_ = _make_inplace(logical_or)
 logical_xor_ = _make_inplace(logical_xor)
 lt_ = _make_inplace(lt)
-mul_ = _make_inplace(mul)
+mul_ = _make_inplace(mul, shape_preserving=shape_preserving_mul_custom)
 mvlgamma_ = _make_inplace(mvlgamma)
 nan_to_num_ = _make_inplace(nan_to_num)
 ne_ = _make_inplace(ne)
-neg_ = _make_inplace(neg)
+neg_ = _make_inplace(neg, shape_preserving=shape_preserving_default)
 nextafter_ = _make_inplace(nextafter)
 pow_ = _make_inplace(pow)
 reciprocal_ = _make_inplace(reciprocal)
@@ -5265,12 +5291,12 @@ rsqrt_ = _make_inplace(rsqrt)
 sgn_ = _make_inplace(sgn)
 sigmoid_ = _make_inplace(sigmoid)
 sign_ = _make_inplace(sign)
-sin_ = _make_inplace(sin)
+sin_ = _make_inplace(sin, shape_preserving=shape_preserving_default)
 sinc_ = _make_inplace(sinc)
 sinh_ = _make_inplace(sinh)
 sqrt_ = _make_inplace(sqrt)
 square_ = _make_inplace(square)
-sub_ = _make_inplace(sub)
+sub_ = _make_inplace(sub, shape_preserving=shape_preserving_default)
 tan_ = _make_inplace(tan)
 tanh_ = _make_inplace(tanh)
 tril_ = _make_inplace(tril)

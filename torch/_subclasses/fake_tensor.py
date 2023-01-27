@@ -740,7 +740,7 @@ class FakeTensorMode(TorchDispatchMode):
         self,
         *,
         allow_fallback_kernels=True,
-        allow_meta=False,
+        allow_meta=True,
         throw_on_data_dependent_ops=True,
         allow_non_fake_inputs=False,
         shape_env=None,
@@ -773,6 +773,15 @@ class FakeTensorMode(TorchDispatchMode):
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs if kwargs else {}
 
+        from torch._decomp import decomposition_table
+
+        if func in decomposition_table:
+            decomp_f = decomposition_table[func]
+            if decomp_f.shape_preserving is not None:
+                shape_preserving_result = decomp_f.shape_preserving(*args, **kwargs)
+                if shape_preserving_result is not None:
+                    return shape_preserving_result
+
         if func == torch.ops.prim.device.default:
             assert len(args) == 1 and isinstance(args[0], FakeTensor)
             if args[0].fake_mode.in_kernel_invocation:
@@ -791,13 +800,6 @@ class FakeTensorMode(TorchDispatchMode):
             with in_kernel_invocation_manager(self):
                 return func(*args, **kwargs)
 
-        flat_arg_fake_tensors = tree_flatten_only(FakeTensor, (args, kwargs))
-        flat_symints = tree_flatten_only(torch.SymInt, (args, kwargs))
-        has_symbolic_sizes = (
-            any([i._has_symbolic_sizes_strides for i in flat_arg_fake_tensors])
-            or len(flat_symints) > 0
-        )
-
         converter = self.fake_tensor_converter
 
         # If this is a lift, the input tensor is guaranteed to be a
@@ -812,14 +814,6 @@ class FakeTensorMode(TorchDispatchMode):
                     out = out.clone()
                 return converter(self, out, make_constant=True)
 
-        # See [subclass inputs] below
-        # NB: If you're seeing a mysterious infinite loop involving fake
-        # tensor, it might be related to this line.  Though I'm not sure
-        # how you'll know to read this comment, as this line won't show up
-        # in the stack trace.
-        if self.check_for_subclass(args, kwargs):
-            return NotImplemented
-
         # if we are in the dispatch mode, we will enter this function even if the inputs
         # are not FakeTensors. For now, throw if any non-Fake Tensor inputs
         # and just support constructors.
@@ -831,6 +825,24 @@ class FakeTensorMode(TorchDispatchMode):
                 len(kwargs) == 0 and len(args) == 1 and type(args[0]) is torch.Tensor
             ), f"{args} {kwargs}"
             return converter(self, args[0])
+
+        # See [subclass inputs] below
+        # NB: If you're seeing a mysterious infinite loop involving fake
+        # tensor, it might be related to this line.  Though I'm not sure
+        # how you'll know to read this comment, as this line won't show up
+        # in the stack trace.
+        flat_arg_all_tensors = tree_flatten_only(torch.Tensor, (args, kwargs))
+        if self.check_for_subclass(flat_arg_all_tensors):
+            return NotImplemented
+
+        flat_arg_fake_tensors = [
+            x for x in flat_arg_all_tensors if isinstance(x, FakeTensor)
+        ]
+        flat_symints = tree_flatten_only(torch.SymInt, (args, kwargs))
+        has_symbolic_sizes = (
+            any([i._has_symbolic_sizes_strides for i in flat_arg_fake_tensors])
+            or len(flat_symints) > 0
+        )
 
         args, kwargs = self.validate_and_convert_non_fake_tensors(
             func, converter, args, kwargs
@@ -887,7 +899,6 @@ class FakeTensorMode(TorchDispatchMode):
         from torch._decomp import meta_table as meta_table
 
         if func not in meta_table and not self.cpp_meta_supports_symint(func):
-            from torch._decomp import decomposition_table
 
             # Prefer Python decompositions over C++ ones
             if func in decomposition_table and (
@@ -949,7 +960,7 @@ class FakeTensorMode(TorchDispatchMode):
     # fake tensor is not supported.  What we actually wanted to happen
     # was to give the subclass a chance to figure out what it wants to
     # before erroring out. Returning NotImplemented here allows this.
-    def check_for_subclass(self, args, kwargs):
+    def check_for_subclass(self, flat_args_kwargs):
         def check(x):
             return (
                 not isinstance(x, FakeTensor)
@@ -957,7 +968,7 @@ class FakeTensorMode(TorchDispatchMode):
                 and type(x) is not torch.nn.Parameter
             )
 
-        return any([check(x) for x in tree_flatten_only(torch.Tensor, (args, kwargs))])
+        return any([check(x) for x in flat_args_kwargs])
 
     def validate_and_convert_non_fake_tensors(self, func, converter, args, kwargs):
         """
