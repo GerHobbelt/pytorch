@@ -4556,7 +4556,7 @@ class MiscTests(torch._dynamo.test_case.TestCase):
             if "TENSOR_MATCH" in guard.guard_types:
                 seen = True
                 self.assertEqual(
-                    guard.code_list[0], "hasattr(a, '_dynamo_dynamic_indices') == {0}"
+                    guard.code_list[0], "hasattr(a, '_dynamo_dynamic_indices')"
                 )
                 self.assertEqual(guard.code_list[1], "a._dynamo_dynamic_indices == {0}")
         self.assertTrue(seen)
