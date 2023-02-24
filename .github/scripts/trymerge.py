@@ -598,10 +598,12 @@ def add_workflow_conclusions(
                 else:
                     checkruns = None
 
-    add_conclusions(checksuites["edges"])
+    all_edges = checksuites["edges"].copy()
     while bool(checksuites["pageInfo"]["hasNextPage"]):
         checksuites = get_next_checksuites(checksuites)
-        add_conclusions(checksuites["edges"])
+        all_edges.extend(checksuites["edges"])
+
+    add_conclusions(all_edges)
 
     # Flatten the dictionaries.  If there exists jobs in the workflow run, put
     # the jobs in but don't put the workflow in.  We care more about the jobs in
@@ -1737,7 +1739,7 @@ def main() -> None:
             # Hide this behind a collapsed bullet since it's not helpful to most devs
             internal_debugging = "\n".join(line for line in (
                 "<details><summary>Details for Dev Infra team</summary>",
-                f"Raised by <a href=\"{run_url}\">workflow job</a>",
+                f"Raised by <a href=\"{run_url}\">workflow job</a>\n",
                 f"Failing merge rule: {failing_rule}" if failing_rule else "",
                 "</details>"
             ) if line)  # ignore empty lines during the join
