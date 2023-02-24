@@ -449,13 +449,15 @@ class GuardBuilder(GuardBuilderBase):
                 self.tensor_check_examples.append(value)
 
             if hasattr(value, "_dynamo_dynamic_indices"):
-                code.append(f"hasattr({tensor_name}, '_dynamo_dynamic_indices') == {value._dynamo_dynamic_indices}")
+                code.append(
+                    f"hasattr({tensor_name}, '_dynamo_dynamic_indices') == {value._dynamo_dynamic_indices}"
+                )
                 terms.append("_dynamo_dynamic_indices")
 
             for term in terms:
                 real_value = self.get(tensor_name + "." + term)
                 code.append(f"{tensor_name}.{term} == {real_value}")
-                
+
             if len(code) > 0:
                 self._produce_guard_code(guard, code)
 

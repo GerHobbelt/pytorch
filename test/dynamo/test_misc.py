@@ -4486,6 +4486,34 @@ class MiscTests(torch._dynamo.test_case.TestCase):
         ):
             torch._dynamo.optimize("eager")(my_dyn_fn)(y)
 
+    @torch._dynamo.config.patch(dynamic_shapes=True)
+    def test_py_guards_mark_dynamic(self):
+        x = torch.randn([3, 3, 3])
+
+        def my_dyn_fn(a):
+            if a.shape[0] > 2:
+                return a.cos()
+            return a.sin()
+
+        out_guards = None
+
+        def guard_export_fn(guards):
+            nonlocal out_guards
+            out_guards = guards
+
+        torch._dynamo.mark_dynamic(x, 0)
+        torch._dynamo.optimize("eager", guard_export_fn=guard_export_fn)(my_dyn_fn)(x)
+        self.assertTrue(out_guards is not None)
+        seen = False
+        for guard in out_guards:
+            if "TENSOR_MATCH" in guard.guard_types:
+                seen = True
+                self.assertEqual(
+                    guard.code_list[0], "hasattr(a, '_dynamo_dynamic_indices') == {0}"
+                )
+                self.assertEqual(guard.code_list[1], "a._dynamo_dynamic_indices == {0}")
+        self.assertTrue(seen)
+
 
 class CustomFunc1(torch.autograd.Function):
     @staticmethod
