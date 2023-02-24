@@ -451,10 +451,9 @@ class GuardBuilder(GuardBuilderBase):
             # The list of tensor fields and calls we care about can be found in `terms` below.
             # TODO(voz): We are missing storage offset in all our tensor guards?
             terms = []
-            code = []
+            code: List[str] = list()
             if self.check_fn_manager.output_graph.export:
                 self.TYPE_MATCH(guard)
-                code = []
                 terms = [
                     "dtype",
                     "device.type",
