@@ -1301,7 +1301,7 @@ def main():
         get_test_case_configs(dirpath=test_directory)
 
     failure_messages = []
-
+    selected_tests = [x for x in selected_tests if x in USE_PYTEST_LIST]
     # parallel = in parallel with other files
     # serial = this file on it's own.  The file might still be run in parallel with itself (ex test_ops)
     selected_tests_parallel = [x for x in selected_tests if not must_serial(x)]
