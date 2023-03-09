@@ -1,10 +1,108 @@
 import contextlib
+import copy
+
+import dataclasses
+import os
 
 import pickle
+
+import tempfile
 import unittest
+from os.path import abspath, dirname
 from types import FunctionType, ModuleType
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set, Type
 from unittest import mock
+
+import torch
+
+from . import external_utils
+
+
+class ConfigMixin:
+
+    def setup_debug_dir(self):
+        if self.DEBUG_DIR_VAR_NAME in os.environ:
+            self.debug_dir_root = os.path.join(
+                os.environ[DEBUG_DIR_VAR_NAME], "torch_compile_debug"
+            )
+        elif self.is_fbcode():
+            self.debug_dir_root = os.path.join(
+                tempfile.gettempdir(), "torch_compile_debug"
+            )
+        else:
+            self.debug_dir_root = os.path.join(os.getcwd(), "torch_compile_debug")
+        return self
+
+    def save_config(self):
+        config = copy.copy(self)
+        for key in _save_config_ignore:
+            delattr(config, key)
+        return pickle.dumps(config, protocol=2)
+
+    def load_config(self, content):
+        state = pickle.loads(content)
+        self.__dict__.update(state.__dict__)
+        return self
+
+    def update_single(self, key, val):
+        pieces = key.split('.')
+        current = self
+        for token in pieces[:-1]:
+            current = getattr(current, token)
+        setattr(current, pieces[-1], val)
+
+
+    def update(self, content_dict):
+        for k, v in content_dict.items():
+            self.update_single(k, v)
+
+    def patch(self, arg1=None, arg2=None, **kwargs):
+        """
+        Decorator and/or context manager to make temporary changes to a config.
+
+        As a decorator:
+
+            @config.patch("name", val)
+            @config.patch(name1=val1, name2=val2):
+            @config.patch({"name1": val1, "name2", val2})
+            def foo(...):
+                ...
+
+        As a context manager:
+
+            with config.patch("name", val):
+                ...
+        """
+        if arg1 is not None:
+            if arg2 is not None:
+                # patch("key", True) syntax
+                changes = {arg1: arg2}
+            else:
+                # patch({"key": True}) syntax
+                changes = arg1
+            assert not kwargs
+        else:
+            # patch(key=True) syntax
+            changes = kwargs
+            assert arg2 is None
+        assert isinstance(changes, dict), f"expected `dict` got {type(changes)}"
+        prior = {}
+        config = self
+
+        class ConfigPatch(ContextDecorator):
+            def __enter__(self):
+                assert not prior
+                for key in changes.keys():
+                    # KeyError on invalid entry
+                    prior[key] = getattr(config, key)
+                config.update(changes)
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                config.update(prior)
+                prior.clear()
+
+        return ConfigPatch()
+
 
 # Types saved/loaded in configs
 CONFIG_TYPES = (int, float, bool, type(None), str, list, set, tuple, dict)

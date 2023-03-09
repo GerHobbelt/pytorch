@@ -1,6 +1,10 @@
+import sys
 from typing import Any, Dict, List, Optional
 
 import torch.fx
+from .config import default_config as config
+sys.modules[f"{__name__}.config"] = config
+
 
 __all__ = ["compile", "list_mode_options", "list_options"]
 

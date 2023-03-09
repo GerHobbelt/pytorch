@@ -152,7 +152,7 @@ def _allowed_function_ids():
         if module is None:
             return False
 
-        mod_name = module.__name__
+        mod_name = getattr(module, '__name__', '')
 
         if any(mod_name.startswith(m) for m in disallowed_modules):
             return False
