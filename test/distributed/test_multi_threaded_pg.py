@@ -1,5 +1,6 @@
 # Owner(s): ["oncall: distributed"]
 
+import os
 import sys
 import torch
 import torch.distributed as dist
@@ -97,6 +98,11 @@ class TestCollectivesWithBaseClass(MultiThreadedTestCase):
     def setUp(self):
         super().setUp()
         self._spawn_threads()
+        os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
+
+    def tearDown(self):
+        super().tearDown()
+        os.environ["TORCH_DIST_INIT_BARRIER"] = "0"
 
     def test_allgather(self):
         input_tensor = torch.ones(3, 3) * dist.get_rank()
