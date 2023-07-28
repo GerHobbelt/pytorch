@@ -509,7 +509,6 @@ def mps_ops_modifier(ops):
         'polygammapolygamma_n_4': None,
         'qr': None,
         'quantile': None,
-        'renorm': None,
         'rsub': None,
         'scatter_reduceamax': None,
         'scatter_reduceamin': None,
