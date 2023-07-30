@@ -70,7 +70,7 @@ else()
     ${pytorch_android_DIR}/pytorch_jni_common.h
   )
 endif()
-if(${BUILD_SHARED_LIBS})
+if(BUILD_SHARED_LIBS)
   add_library(${PYTORCH_JNI_TARGET} SHARED ${pytorch_android_SOURCES})
 else()
   add_library(${PYTORCH_JNI_TARGET} STATIC ${pytorch_android_SOURCES})
@@ -179,7 +179,7 @@ install(TARGETS ${PYTORCH_JNI_TARGET}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}) #For windows
 
-if(MSVC AND ${BUILD_SHARED_LIBS})
+if(MSVC AND BUILD_SHARED_LIBS)
   install(FILES $<TARGET_PDB_FILE:pytorch_jni> DESTINATION ${CMAKE_INSTALL_LIBDIR} OPTIONAL)
   install(TARGETS ${PYTORCH_JNI_TARGET} DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
