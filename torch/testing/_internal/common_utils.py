@@ -2542,6 +2542,8 @@ This message can be suppressed by setting PYTORCH_PRINT_REPRO_ON_FAILURE=0"""
         # decorator to disable the invariant checks.
         torch.sparse.check_sparse_tensor_invariants.enable()
 
+        assert torch.get_default_dtype() == torch.float
+
     def tearDown(self):
         # There exists test cases that override TestCase.setUp
         # definition, so we cannot assume that _check_invariants
@@ -2552,6 +2554,8 @@ This message can be suppressed by setting PYTORCH_PRINT_REPRO_ON_FAILURE=0"""
                 torch.sparse.check_sparse_tensor_invariants.enable()
             else:
                 torch.sparse.check_sparse_tensor_invariants.disable()
+
+        assert torch.get_default_dtype() == torch.float
 
     @staticmethod
     def _make_crow_indices(n_rows, n_cols, nnz,
