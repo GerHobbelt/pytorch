@@ -1209,6 +1209,11 @@ class CppWrapperCodeGen(WrapperCodeGen):
                     """
                 )
 
+            if V.graph.aot_mode:
+                for kernel in self.src_to_kernel.values():
+                    self.prefix.writeline(f"CUfunction {kernel} = nullptr;")
+                self.prefix.writeline("\n")
+
     def codegen_input_size_var_decl(self, code: IndentedBuffer, name):
         if config.aot_inductor.abi_compatible:
             code.writeline(f"int64_t* {name}_size;")
@@ -1901,6 +1906,31 @@ class CudaWrapperCodeGen(CppWrapperCodeGen):
                 return func;
             }
 
+            static inline CUfunction loadAotModeKernel(
+                    std::unordered_map<std::string, CUfunction> &kernels,
+                    const std::string &name,
+                    const std::optional<std::string> &cubinDir,
+                    const std::string &filePath,
+                    const std::string &funcName,
+                    uint32_t sharedMemBytes) {
+                auto it = kernels.find(name);
+                if (it != kernels.end()) {
+                    return it->second;
+                }
+
+                CUfunction kernel{nullptr};
+                if (cubinDir) {
+                    std::filesystem::path p1{*cubinDir};
+                    std::filesystem::path p2{filePath};
+                    p1 /= p2.filename();
+                    kernel = loadKernel(p1.string(), funcName, sharedMemBytes);
+                } else {
+                    kernel = loadKernel(filePath, funcName, sharedMemBytes);
+                }
+                kernels[name] = kernel;
+                return kernel;
+            }
+
             static inline void launchKernel(
                     CUfunction func,
                     uint32_t gridX,
@@ -1932,9 +1962,10 @@ class CudaWrapperCodeGen(CppWrapperCodeGen):
 
     def generate(self):
         self.prefix.writeline("\n")
-        for kernel in self.src_to_kernel.values():
-            self.prefix.writeline(f"static CUfunction {kernel} = nullptr;")
-        self.prefix.writeline("\n")
+        if not V.graph.aot_mode:
+            for kernel in self.src_to_kernel.values():
+                self.prefix.writeline(f"static CUfunction {kernel} = nullptr;")
+            self.prefix.writeline("\n")
         return super().generate()
 
     def generate_load_kernel(self, name, params):
@@ -1948,22 +1979,9 @@ class CudaWrapperCodeGen(CppWrapperCodeGen):
         shared_mem = params.get("shared_mem", 0)
         self.writeline(f"if ({name} == nullptr) {{")
         if V.graph.aot_mode:
-            runtime_cubin_path_var = f"var_{next(self.arg_var_id)}"
-            self.writeline("    if (this->cubin_dir_.has_value()) {")
             self.writeline(
-                f"""        std::filesystem::path {runtime_cubin_path_var}{{this->cubin_dir_.value()}};"""
+                f"""    {name} = loadAotModeKernel(this->cubin_kernels_, "{name}", this->cubin_dir_, "{cubin_path}", "{mangled_name}", {shared_mem});"""
             )
-            self.writeline(
-                f"""        {runtime_cubin_path_var} /= "{os.path.basename(cubin_path)}";"""
-            )
-            self.writeline(
-                f"""        {name} = loadKernel({runtime_cubin_path_var}.c_str(), "{mangled_name}", {shared_mem});"""
-            )
-            self.writeline("    } else {")
-            self.writeline(
-                f"""        {name} = loadKernel("{cubin_path}", "{mangled_name}", {shared_mem});"""
-            )
-            self.writeline("    }")
         else:
             self.writeline(
                 f"""    {name} = loadKernel("{cubin_path}", "{mangled_name}", {shared_mem});"""

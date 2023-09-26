@@ -368,6 +368,9 @@ class AOTInductorModelBase {
   // A directory with CUDA binary files, e.g. compiled kernels, etc.
   const std::optional<std::string> cubin_dir_;
 
+  // Loaded kernels from .cubin files will be cached in this hash map.
+  std::unordered_map<std::string, CUfunction> cubin_kernels_;
+
   // Record if the model finishes an inference run so that its owning
   // AOTModelContainer can re-use this instance.
   std::optional<cudaEvent_t> run_finished_;
