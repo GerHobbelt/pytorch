@@ -466,7 +466,7 @@ def Dim(name: str, *, min: Optional[int] = None, max: Optional[int] = None):
         A type that can be used in dynamic shape specifications for tensors.
     """
     _min = 2 if min is None else builtins.max(min, 2)
-    _max = sys.maxsize if max is None else builtins.min(max, sys.maxsize)
+    _max = sys.maxsize - 1 if max is None else builtins.min(max, sys.maxsize - 1)
     assert _max > _min, f"Cannot create Dim with inconsistent min={min}, max={max}"
     return _Dim(name, (int,), {"min": _min, "max": _max})
 
