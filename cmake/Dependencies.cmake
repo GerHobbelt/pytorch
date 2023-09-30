@@ -1376,7 +1376,6 @@ if(USE_DISTRIBUTED AND USE_TENSORPIPE)
     set(BUILD_SHARED_LIBS ${OLD_BUILD_SHARED_LIBS})
     if(USE_CUDA)
       list(APPEND Caffe2_CUDA_DEPENDENCY_LIBS tensorpipe_cuda)
-      target_compile_options_if_supported(tensorpipe_cuda "-fPIC")
     elseif(USE_ROCM)
       message(WARNING "TensorPipe doesn't yet support ROCm")
       # Not yet...
