@@ -371,7 +371,8 @@ class ShardedTensor(ShardedTensorBase):
         self,
         dst: int = 0,
         out: Optional[torch.Tensor] = None,
-        enforce_dtype: Optional[bool] = False,
+        enforce_dtype: bool = False,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         """
         Creates a full :class:`Tensor` on rank ``dst`` by gathering all shards of the
@@ -387,7 +388,9 @@ class ShardedTensor(ShardedTensorBase):
             out (:class `torch.Tensor`, optional): The output full tensor.
                 Must to be provided ONLY on ``dst`` rank.
                 Default: ``None``
-            enforce_dtype: force the imterediate tensor with the same type as input and output
+            enforce_dtype: Deprecated.
+            dtype: force intermediate tensors to have this dtype.
+                Default: ``None``
         """
         def shard_size(shard_md):
             return reduce((lambda x, y: x * y), shard_md.shard_sizes)  # type: ignore[attr-defined]
@@ -414,16 +417,11 @@ class ShardedTensor(ShardedTensorBase):
         if rank == dst:
             assert out is not None
             # TODO make it as a view of out tensor
-            gather_list = [torch.empty((max_rank_size,), device=out.device, dtype=out.dtype
-                           if enforce_dtype else torch.float32) for _ in range(world_size)]
+            gather_list = [torch.empty((max_rank_size,), device=out.device, dtype=dtype) for _ in range(world_size)]
         else:
             gather_list = None
 
         with torch.no_grad():
-            if enforce_dtype and len(local_shards) > 0:
-                dtype = local_shards[0].tensor.dtype
-            else:
-                dtype = torch.float32
             data = torch.empty(max_rank_size, device=self._get_preferred_device(), dtype=dtype)
 
             for shard in local_shards:
