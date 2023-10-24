@@ -993,6 +993,13 @@ class VariableBuilder:
                 guards=self.make_guards(GuardBuilder.CONSTANT_MATCH),
             )
 
+    def assert_not_wrapped_by_this_graph(self, value: torch.Tensor):
+        if self.tx.output.fake_mode.is_our_fake(value):
+            raise InternalTorchDynamoError(
+                "Cannot wrap a Tensor that has already been",
+                "wrapped by this instance of Dynamo",
+            )
+
     def wrap_tensor(self, value: torch.Tensor):
         source = self.get_source()
 
@@ -1000,6 +1007,7 @@ class VariableBuilder:
             source.guard_source().is_nn_module()
             or get_static_address_type(value) is not None
         ) and not source.guard_source().is_fsdp_module():
+            self.assert_not_wrapped_by_this_graph(value)
             return self.tx.output.register_attr_or_module(
                 value,
                 self.name,
@@ -1009,6 +1017,7 @@ class VariableBuilder:
             )
 
         if is_constant_source(source):
+            self.assert_not_wrapped_by_this_graph(value)
             return self.tx.output.register_attr_or_module(
                 value,
                 re.sub(r"[^a-zA-Z0-9]+", "_", self.name),
@@ -1069,6 +1078,9 @@ class VariableBuilder:
                 stored_value = stored_value.add_guards(self.make_guards(dup_guard))
             return stored_value
 
+        # By this point, we should have deduplicated all tensors
+        self.assert_not_wrapped_by_this_graph(value)
+
         # tx.output has multiple tracers if we're introspecting HigherOrderOperator.
         # When we've discovered an untracked tensor, then we actually need
         # to get Dynamo to track the tensor (which is what this function does)
@@ -1117,10 +1129,9 @@ class VariableBuilder:
         # TODO: I think the result is guaranteed to be fake with
         # ignore_subclass changes
         # Note: this information is conveyed via subclass_type now
-        fake_tensor_value = None
-        example_value = tensor_variable.proxy.node.meta["example_value"]
-        if is_fake(example_value):
-            fake_tensor_value = example_value
+        fake_tensor_value = tensor_variable.proxy.node.meta["example_value"]
+        if not is_fake(example_value):
+            raise InternalTorchDynamoError("Wrapped Tensor must have a fake value")
 
         grapharg = GraphArg(source, value, False, fake_tensor_value)
         tensor_proxy.node.meta["grapharg"] = grapharg
