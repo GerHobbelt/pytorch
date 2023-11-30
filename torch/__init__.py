@@ -56,7 +56,6 @@ __all__ = [
     'set_warn_always', 'is_warn_always_enabled', 'SymInt', 'SymFloat',
     'SymBool', 'sym_not', 'unravel_index',
     'sym_int', 'sym_float', 'sym_max', 'sym_min', 'sym_ite', 'compile', 'vmap',
-    'sym_sqrt',
     'export', 'autocast', 'cond',
 ]
 
@@ -486,15 +485,26 @@ def sym_min(a, b):
         return b.__sym_min__(a)
     return builtins.min(a, b)  # type: ignore[operator]
 
-# Drop in replacement for math.sqrt
-def sym_sqrt(a):
-    from .overrides import has_torch_function_unary, handle_torch_function
+# Drop in replacement for math.sqrt, math.sin, math.cos etc
+current_module = sys.modules[__name__]
 
-    if has_torch_function_unary(a):
-        return handle_torch_function(sym_sqrt, (a,), a)
-    if hasattr(a, "__sym_sqrt__"):
-        return a.__sym_sqrt__()
-    return math.sqrt(a)
+def get_sym_math_fn(name):
+    def fn(a):
+        from .overrides import has_torch_function_unary, handle_torch_function
+
+        if has_torch_function_unary(a):
+            return handle_torch_function(fn, (a,), a)
+        if hasattr(a, f"__sym_{name}__"):
+            return getattr(a, f"__sym_{name}__")()
+        return getattr(math, name)(a)
+
+    fn.__qualname__ = fn.__name__ = f"sym_{name}"
+    return fn
+
+for name in ("sqrt", "cos", "cosh", "sin", "sinh", "tan", "tanh", "asin", "acos", "atan"):
+    sym_name = f"sym_{name}"
+    setattr(current_module, sym_name, get_sym_math_fn(name))
+    __all__.append(sym_name)
 
 def sym_ite(b, t, f):
     from .overrides import has_torch_function, handle_torch_function

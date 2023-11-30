@@ -17,6 +17,8 @@ import sys
 from functools import lru_cache
 from typing import Optional, Type, TYPE_CHECKING, Union
 
+import torch
+
 # NB: The sym_* functions are used via getattr() and must be imported here.
 from torch import (  # noqa: F401
     sym_float,
@@ -24,7 +26,6 @@ from torch import (  # noqa: F401
     sym_max,
     sym_min,
     sym_not,
-    sym_sqrt,
     SymBool,
     SymFloat,
     SymInt,
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-__all__ = ["SymNode", "method_to_operator", "magic_methods", "sym_sqrt"]
+__all__ = ["SymNode", "method_to_operator", "magic_methods"]
 
 
 SymTypes = (SymInt, SymFloat, SymBool)
@@ -295,9 +296,6 @@ class SymNode:
     def sym_ite(self, then_val, else_val) -> "SymNode":
         return self._sym_ite(then_val, else_val)  # type: ignore[attr-defined]
 
-    def sym_sqrt(self) -> "SymNode":
-        return self._sym_sqrt()  # type: ignore[attr-defined]
-
     def is_contiguous(self, sizes, strides) -> "SymNode":
         return self._is_contiguous(sizes, strides)  # type: ignore[attr-defined]
 
@@ -428,9 +426,9 @@ METHOD_TO_OPERATOR = {
     "sym_max": sym_max,
     "sym_min": sym_min,
     "sym_not": sym_not,
-    "sym_sqrt": sym_sqrt,
     "truediv": operator.truediv,
 }
+
 
 unary_magic_methods = {
     "abs",
@@ -438,9 +436,37 @@ unary_magic_methods = {
     "ceil",
     "floor",
     "neg",
-    "sym_sqrt",
     "sym_not",
 }
+
+
+# Adding math ops: sqrt, cos, sin, ...
+def get_sym_node_fn(name):
+    def fn(self):
+        return getattr(self, f"_sym_{name}")()
+
+    return fn
+
+
+math_op_names = (
+    "sqrt",
+    "cos",
+    "cosh",
+    "sin",
+    "sinh",
+    "tan",
+    "tanh",
+    "asin",
+    "acos",
+    "atan",
+)
+for name in math_op_names:
+    sym_name = f"sym_{name}"
+    setattr(SymNode, sym_name, get_sym_node_fn(name))
+    METHOD_TO_OPERATOR[sym_name] = getattr(torch, sym_name)
+    unary_magic_methods.add(sym_name)
+    __all__.append(sym_name)
+
 
 # Most methods are only registered on SymInt and SymFloat
 # Some methods are only be registered on SymBool
@@ -453,7 +479,18 @@ bool_magic_methods = only_bool_magic_methods | also_bool_magic_methods
 magic_methods_on_operator_with_trailing_underscore = {"and", "or"}
 
 
-always_float_magic_methods = {"truediv", "sym_float", "sym_sqrt", "pow"}
+always_float_magic_methods = {
+    "truediv",
+    "sym_float",
+    "pow",
+}
+
+
+for name in math_op_names:
+    sym_name = f"sym_{name}"
+    always_float_magic_methods.add(sym_name)
+
+
 always_int_magic_methods = {"ceil", "floor"}
 always_bool_magic_methods = {
     "eq",
@@ -618,10 +655,21 @@ def _sympy_ite(a, t, f):
     return sympy.Piecewise((t, a), (f, True))
 
 
-def _sympy_sqrt(a):
-    import sympy
+current_module = sys.modules[__name__]
 
-    return sympy.sqrt(a)
+
+def get_sym_math_fn(name):
+    def fn(a):
+        import sympy
+
+        return getattr(sympy, name)(a)
+
+    fn.__qualname__ = fn.__name__ = f"_sym_{name}"
+    return fn
+
+
+for name in math_op_names:
+    setattr(current_module, f"_sym_{name}", get_sym_math_fn(name))
 
 
 def _sympy_abs(a):
@@ -654,9 +702,13 @@ magic_methods = {
     "sym_min": _sympy_min,
     "sym_max": _sympy_max,
     "sym_ite": _sympy_ite,
-    "sym_sqrt": _sympy_sqrt,
     "abs": _sympy_abs,
 }
+
+
+for name in math_op_names:
+    sym_name = f"sym_{name}"
+    magic_methods[sym_name] = getattr(current_module, f"_sym_{name}")
 
 
 def sympy_is_contiguous(sizes, strides):

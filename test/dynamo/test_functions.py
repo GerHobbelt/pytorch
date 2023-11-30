@@ -1124,6 +1124,36 @@ class FunctionTests(torch._dynamo.test_case.TestCase):
     #         case {"b": param}:
     #             return x / param
 
+    @common_utils.parametrize(
+        "op",
+        [
+            math.sqrt,
+            math.sin,
+            math.cos,
+            math.cosh,
+            math.sin,
+            math.sinh,
+            math.tan,
+            math.tanh,
+            math.asin,
+            math.acos,
+            math.atan,
+        ],
+    )
+    def test_math_ops(self, op):
+        def func(x, a):
+            return x + op(a)
+
+        cnt = torch._dynamo.testing.CompileCounter()
+        cfunc = torch._dynamo.optimize_assert(cnt)(func)
+
+        assert cnt.frame_count == 0
+        x = torch.rand(10)
+        a = 1 if op in (math.asin, math.acos) else 12
+        expected = func(x, a)
+        output = cfunc(x, a)
+        self.assertTrue(same(output, expected))
+
     @make_test
     def test_numpy_meshgrid(x, y):
         r1, r2 = np.meshgrid(x.numpy(), y.numpy())
@@ -2648,6 +2678,7 @@ def forward(self, x_1, output_1):
 
 
 common_utils.instantiate_parametrized_tests(DefaultsTests)
+common_utils.instantiate_parametrized_tests(FunctionTests)
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
