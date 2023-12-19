@@ -2,8 +2,8 @@
 
 import io
 
-import test_export
-import testing
+from . import test_export
+from . import testing
 
 from torch.export import export, load, save
 
