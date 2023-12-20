@@ -1206,6 +1206,10 @@ def aot_inductor_launcher(so_path: str, device: str):
             std::vector<const char*> get_call_spec() {{
                 return runner.get_call_spec();
             }}
+
+            std::unordered_map<std::string, std::string> get_constant_names_to_original_fqns() {{
+                return runner.getConstantNamesToOriginalFQNs();
+            }}
         """
     elif device == "cpu":
         return f"""
@@ -1219,6 +1223,10 @@ def aot_inductor_launcher(so_path: str, device: str):
 
             std::vector<const char*> get_call_spec() {{
                 return runner.get_call_spec();
+            }}
+
+            std::unordered_map<std::string, std::string> get_constant_names_to_original_fqns() {{
+                return runner.getConstantNamesToOriginalFQNs();
             }}
         """
     else:
