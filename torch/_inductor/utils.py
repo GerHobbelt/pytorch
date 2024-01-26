@@ -45,7 +45,9 @@ from torch._dynamo.device_interface import get_interface_for_device
 from torch.autograd import DeviceType
 from torch.autograd.profiler_util import EventList
 from torch.utils._sympy.functions import CeilDiv, CleanDiv, FloorDiv, ModularIndexing
-
+import tempfile
+import io
+from datetime import datetime
 from . import config
 
 log = logging.getLogger(__name__)
@@ -1225,3 +1227,29 @@ class Placeholder(enum.Enum):
     # The descriptive name of the triton kernel; when unique_kernel_names = False, this
     # placeholder will be replaced with a string with more information.
     DESCRIPTIVE_NAME = "DESCRIPTIVE_NAME"
+
+def pass_execution_and_save(func, gm, msg):
+    from .pattern_matcher import stable_topological_sort # noqa
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+    ) as f:
+        before_io = io.StringIO()
+        after_io = io.StringIO()
+        print(f"Before:\n{gm.graph}", file=f)
+        print(gm.graph, file=before_io)
+        start_time = datetime.now()
+        func(gm.graph)
+        time_elapsed = datetime.now() - start_time
+        # recompile graph
+        stable_topological_sort(gm.graph)
+        gm.graph.lint()
+        gm.recompile()
+
+        print(f"After:\n{gm.graph}", file=f)
+        print(gm.graph, file=after_io)
+        t = before_io.getvalue() == after_io.getvalue()
+        log.info(
+            f"{msg}, save before/after graph to {f.name}, graph before/after are the same = {t}, time elapsed = {time_elapsed}"
+        )

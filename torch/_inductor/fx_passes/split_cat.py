@@ -299,10 +299,10 @@ class TorchSplit(CallFunction):
     splits are unique getitems.
     """
 
-    def __init__(self, arg, sizes):
+    def __init__(self, arg, sizes, func=torch.split):
         # using KeywordArg("dim") for `dim` checks they all match
         super().__init__(
-            torch.split, arg, sizes, _users=MULTIPLE, dim=KeywordArg("dim")
+            func, arg, sizes, _users=MULTIPLE, dim=KeywordArg("dim")
         )
 
     def _match(self, node: torch.fx.Node, ctx: MatchContext):
