@@ -81,6 +81,9 @@ def check_model(
         torch.manual_seed(0)
         if not isinstance(model, types.FunctionType):
             model = model.to(self.device)
+            flattened, spec = pytree.tree_flatten(example_inputs)
+            flattened = tuple([input.to(self.device) for input in flattened])
+            example_inputs = pytree.tree_unflatten(flattened, spec)
         ref_model = copy.deepcopy(model)
         ref_inputs = copy.deepcopy(example_inputs)
         expected = ref_model(*ref_inputs)
@@ -843,6 +846,8 @@ class AOTInductorTestsTemplate:
             def forward(self, x: Dict[str, torch.Tensor]):
                 add_ = torch.zeros(5)
                 mul_ = torch.ones(5)
+                add_ = add_.to(list(x.values())[0].device)
+                mul_ = mul_.to(list(x.values())[0].device)
                 for v in x.values():
                     add_ += v
                     mul_ *= v
@@ -1666,7 +1671,7 @@ class AOTInductorTestsTemplate:
             torch.randn(4, 4, device="cuda"),
             torch.randn(1, 16, device="cuda"),
         )
-
+        breakpoint()
         so_path: str = AOTIRunnerUtil.compile(
             Model(),
             example_inputs,
