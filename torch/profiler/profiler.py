@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -788,6 +789,23 @@ class ExecutionTraceObserver(_ITraceObserver):
         """
         if self._registered:
             self.stop()
+
+            # Save the kernel paths for the generated kernels
+            from torch._inductor.codecache import PyCodeCache as PyCodeCache
+
+            kernel_files = [
+                v.__file__
+                for v in PyCodeCache.cache.values()
+                if getattr(v, "__file__", None) is not None
+            ]
+            work_dir, _ = os.path.split(self._output_file_path)
+            for kernel_file in kernel_files:
+                if kernel_file is None:
+                    continue
+                path, name = os.path.split(kernel_file)
+                dst = work_dir + "/" + name
+                shutil.copyfile(kernel_file, dst)
+
             _remove_execution_trace_observer()
             self._registered = False
 

@@ -207,10 +207,10 @@ class TestRecordFunction(TestCase):
         u = torch.randn(3, 4, 5, requires_grad=True)
         with _profile(with_stack=True, use_kineto=kineto_available(), record_shapes=True) as prof:
             with record_function("## TEST 1 ##", "1, 2, 3"):
-                rf_handle = _record_function_with_args_enter("## TEST 2 ##", 1, False, 2.5, [u, u], "hello", u)
+                rf_handle = _record_function_with_args_enter("## TEST 2 ##", "", 1, False, 2.5, [u, u], "hello", u)
                 _record_function_with_args_exit(rf_handle)
             with record_function("## TEST 3 ##"):
-                rf_handle = _record_function_with_args_enter("## TEST 4 ##")
+                rf_handle = _record_function_with_args_enter("## TEST 4 ##", "")
                 _record_function_with_args_exit(rf_handle)
         return prof
 
@@ -322,7 +322,7 @@ class TestExecutionTrace(TestCase):
             inf_val = float("inf")
             neg_inf_val = float("-inf")
             nan_val = float("nan")
-            rf_handle = _record_function_with_args_enter("## TEST 2 ##", 1, False, 2.5, [u, u], (u, u),
+            rf_handle = _record_function_with_args_enter("## TEST 2 ##", "", 1, False, 2.5, [u, u], (u, u),
                                                          "hello", u, inf_val, neg_inf_val, nan_val)
             x = torch.randn(10, 10, requires_grad=True)
             if use_cuda:

@@ -425,8 +425,14 @@ class TritonTemplateKernel(TritonKernel):
             ] + [meta]
             grid_call = f"{self.grid_fn.__module__}.{self.grid_fn.__name__}({', '.join(grid_call)})"
             wrapper.writeline(
+                f'handle = _record_function_with_args_enter("{name}", getattr({name}, "__file__", '
+                "),"
+                f"{', '.join(call_args)}, grid=\"{grid_call}\", stream={stream_name})"
+            )
+            wrapper.writeline(
                 f"{name}.run({', '.join(call_args)}, grid={grid_call}, stream={stream_name})"
             )
+            wrapper.writeline("_record_function_with_args_exit(handle)")
 
 
 @functools.lru_cache(None)
@@ -521,7 +527,7 @@ class TritonTemplate(KernelTemplate):
                 )
                 + "-"
             )
-            mod = PyCodeCache.load(code, extra)
+            mod, _ = PyCodeCache.load(code, extra)
             _, call_args, _ = kernel.args.python_argdefs()
 
         expected_args = list(unique(x.get_name() for x in input_nodes))
