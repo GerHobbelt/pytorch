@@ -288,7 +288,7 @@ jobs:
           ALPINE_IMAGE: ${{ inputs.ALPINE_IMAGE }}
 
       - name: Cleanup docker
-        if: failure() && inputs.build_environment == 'linux-s390x-binary-manywheel'
+        if: always() && inputs.build_environment == 'linux-s390x-binary-manywheel'
         shell: bash
         run: |
           # on s390x stop the container for clean worker stop
