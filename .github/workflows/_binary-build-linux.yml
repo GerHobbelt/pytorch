@@ -263,7 +263,7 @@ jobs:
           fi
 
       - name: Chown artifacts
-        if: ${{ steps.filter.outputs.is-test-matrix-empty == 'False' }}
+        if: ${{ steps.filter.outputs.is-test-matrix-empty == 'False' && inputs.build_environment != 'linux-s390x-binary-manywheel' }}
         shell: bash
         run: |
           # Ensure the working directory gets chowned back to the current user
