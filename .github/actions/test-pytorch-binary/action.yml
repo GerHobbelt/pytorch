@@ -58,11 +58,11 @@ runs:
           docker stop $(docker ps -q) || true
         fi
 
-      - name: Cleanup docker
-        if: always() && inputs.build_environment == 'linux-s390x-binary-manywheel'
-        shell: bash
-        run: |
-          # on s390x stop the container for clean worker stop
-          # ignore expansion of "docker ps -q" since it could be empty
-          # shellcheck disable=SC2046
-          docker stop $(docker ps -q) || true
+    - name: Cleanup docker
+      if: always() && inputs.build_environment == 'linux-s390x-binary-manywheel'
+      shell: bash
+      run: |
+        # on s390x stop the container for clean worker stop
+        # ignore expansion of "docker ps -q" since it could be empty
+        # shellcheck disable=SC2046
+        docker stop $(docker ps -q) || true
