@@ -90,6 +90,7 @@ jobs:
       test-matrix: ${{ steps.filter.outputs.test-matrix }}
     steps:
       - name: Setup SSH (Click me for login details)
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: pytorch/test-infra/.github/actions/setup-ssh@main
         with:
           github-secret: ${{ secrets.GITHUB_TOKEN }}
@@ -100,8 +101,11 @@ jobs:
       # checkout. In other cases you should prefer a local checkout.
       - name: Checkout PyTorch
         uses: pytorch/pytorch/.github/actions/checkout-pytorch@main
+        with:
+          no-sudo: ${{ inputs.build_environment == 'linux-s390x-binary-manywheel' }}
 
       - name: Setup Linux
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: ./.github/actions/setup-linux
 
       - name: configure aws credentials
@@ -114,12 +118,14 @@ jobs:
 
       - name: Calculate docker image
         id: calculate-docker-image
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
         with:
           docker-image-name: ${{ inputs.docker-image-name }}
 
       - name: Use following to pull public copy of the image
         id: print-ghcr-mirror
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         env:
           ECR_DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
         shell: bash
@@ -128,6 +134,7 @@ jobs:
           echo "docker pull ghcr.io/pytorch/ci-image:${tag/:/-}"
 
       - name: Pull docker image
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: pytorch/test-infra/.github/actions/pull-docker-image@main
         with:
           docker-image: ${{ steps.calculate-docker-image.outputs.docker-image }}
@@ -154,6 +161,7 @@ jobs:
           job-name: ${{ steps.get-job-id.outputs.job-name }}
 
       - name: Download pytest cache
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: ./.github/actions/pytest-cache-download
         continue-on-error: true
         with:
@@ -177,11 +185,20 @@ jobs:
           PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
           TORCH_CUDA_ARCH_LIST: ${{ inputs.cuda-arch-list }}
           DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
+          DOCKER_IMAGE_S390X: ${{ inputs.docker-image-name }}
           XLA_CUDA: ${{ contains(inputs.build-environment, 'xla') && '0' || '' }}
           DEBUG: ${{ inputs.build-with-debug && '1' || '0' }}
           OUR_GITHUB_JOB_ID: ${{ steps.get-job-id.outputs.job-id }}
           HUGGING_FACE_HUB_TOKEN: ${{ secrets.HUGGING_FACE_HUB_TOKEN }}
         run: |
+          if [[ ${BUILD_ENVIRONMENT} == *"s390x"* ]]; then
+            DOCKER_IMAGE="${DOCKER_IMAGE_S390X}"
+
+            # since some steps are skipped on s390x, if they are necessary, run them here
+            env | grep '^GITHUB' >> "/tmp/github_env_${GITHUB_RUN_ID}"
+            env | grep '^CI' >> "/tmp/github_env_${GITHUB_RUN_ID}"
+          fi
+
           # detached container should get cleaned up by teardown_ec2_linux
           container_name=$(docker run \
             -e BUILD_ENVIRONMENT \
@@ -211,6 +228,13 @@ jobs:
           )
           docker exec -t "${container_name}" sh -c '.ci/pytorch/build.sh'
 
+          # on s390x stop the container for clean worker stop
+          if [[ ${BUILD_ENVIRONMENT} == *"s390x"* ]]; then
+            # ignore expansion of "docker ps -q" since it could be empty
+            # shellcheck disable=SC2046
+            docker stop $(docker ps -q) || true
+          fi
+
       - name: Archive artifacts into zip
         if: inputs.build-generates-artifacts && steps.build.outcome != 'skipped'
         run: |
@@ -239,4 +263,13 @@ jobs:
 
       - name: Teardown Linux
         uses: pytorch/test-infra/.github/actions/teardown-linux@main
-        if: always()
+        if: always() && inputs.build-environment != 'linux-s390x-binary-manywheel'
+
+      - name: Cleanup docker
+        if: always() && inputs.build-environment == 'linux-s390x-binary-manywheel'
+        shell: bash
+        run: |
+          # on s390x stop the container for clean worker stop
+          # ignore expansion of "docker ps -q" since it could be empty
+          # shellcheck disable=SC2046
+          docker stop $(docker ps -q) || true

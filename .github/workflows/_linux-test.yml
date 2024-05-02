@@ -68,7 +68,7 @@ jobs:
     steps:
       - name: Setup SSH (Click me for login details)
         uses: pytorch/test-infra/.github/actions/setup-ssh@main
-        if: ${{ !contains(matrix.runner, 'gcp.a100') }}
+        if: ${{ !contains(matrix.runner, 'gcp.a100') && inputs.build-environment != 'linux-s390x-binary-manywheel' }}
         with:
           github-secret: ${{ secrets.GITHUB_TOKEN }}
           instructions: |
@@ -79,6 +79,7 @@ jobs:
         uses: pytorch/pytorch/.github/actions/checkout-pytorch@main
 
       - name: Setup Linux
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: ./.github/actions/setup-linux
 
       - name: configure aws credentials
@@ -91,12 +92,14 @@ jobs:
 
       - name: Calculate docker image
         id: calculate-docker-image
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
         with:
           docker-image-name: ${{ inputs.docker-image }}
 
       - name: Use following to pull public copy of the image
         id: print-ghcr-mirror
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         env:
           ECR_DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
         shell: bash
@@ -105,6 +108,7 @@ jobs:
           echo "docker pull ghcr.io/pytorch/ci-image:${tag/:/-}"
 
       - name: Pull docker image
+        if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         uses: pytorch/test-infra/.github/actions/pull-docker-image@main
         with:
           docker-image: ${{ steps.calculate-docker-image.outputs.docker-image }}
@@ -334,7 +338,7 @@ jobs:
 
       - name: Teardown Linux
         uses: pytorch/test-infra/.github/actions/teardown-linux@main
-        if: always()
+        if: always() && inputs.build-environment != 'linux-s390x-binary-manywheel'
 
       # NB: We are currently having an intermittent GPU-related issue on G5 runners with
       # A10G GPU. Once this happens, trying to reset the GPU as done in setup-nvidia does
@@ -412,3 +416,12 @@ jobs:
             echo "NVIDIA driver detects $GPU_COUNT GPUs. The runner has a broken GPU, shutting it down..."
             .github/scripts/stop_runner_service.sh
           fi
+
+      - name: Cleanup docker
+        if: always() && inputs.build-environment == 'linux-s390x-binary-manywheel'
+        shell: bash
+        run: |
+          # on s390x stop the container for clean worker stop
+          # ignore expansion of "docker ps -q" since it could be empty
+          # shellcheck disable=SC2046
+          docker stop $(docker ps -q) || true
