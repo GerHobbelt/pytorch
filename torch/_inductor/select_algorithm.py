@@ -343,6 +343,7 @@ class TritonTemplateKernel(TritonKernel):
         indices: Union[List[Any], Tuple[Any]],
         val: str,
         mask: Optional[str] = None,
+        indent_width: int = 4,
     ):
         """
         Hook called from template code to store the final output
@@ -396,7 +397,7 @@ class TritonTemplateKernel(TritonKernel):
         def hook():
             # more stuff might have been added since the codegen_body above
             self.codegen_body()
-            return textwrap.indent(self.body.getvalue(), "    ").strip()
+            return textwrap.indent(self.body.getvalue(), " " * indent_width).strip()
 
         assert "<STORE_OUTPUT>" not in self.render_hooks
         self.render_hooks["<STORE_OUTPUT>"] = hook

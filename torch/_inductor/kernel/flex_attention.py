@@ -1,6 +1,7 @@
 """ Triton Implementation of the flex_attention Kernel"""
 
 import logging
+import math
 from typing import Any, List, Tuple
 
 import torch
@@ -377,164 +378,175 @@ def flex_attention_backward_grid(batch_size, num_heads, num_queries, d_model, me
     Each block is responsible for iterating over blocks of keys and values calculating
     the final attention output.
     """
-    import triton
-
-    return (triton.cdiv(num_queries, meta["BLOCK_M"]), batch_size * num_heads, 1)
+    return (batch_size * num_heads, 1)
 
 
-# flex_attention_backward_template = TritonTemplate(
-#     name="flex_attention_backward",
-#     grid=flex_attention_backward_grid,
-#     source=r"""
-# {{def_kernel("Q", "K", "V", "LSE")}}
-# # {{def_kernel("Q", "K", "V", "OUT", "LSE", "DELTA", "GRAD_OUT)}}
-#     # Sub notation for this kernel:
-#     # Q: Query, K: Key, V: Value
-#     # M: Number of queries, N: Number of keys/values, D: Model dimension
-#     # z: Batch size, h: Number of heads, m: Number of queries per head, k: Number of keys per head
-#     # (Modifiable) Config options:
-#     # BLOCK_M
-#     # BLOCK_N
-#     # SCORE_MOD_IS_LINEAR: Is the score modifier linear? If so, we can lift the
-#     # change of base out of the loop
-#     # ROWS_GUARANTEED_SAFE: Is it guaranteed that at least one value in each row
-#     # is not masked out? If so, we can skip an extra safety check
-#     # OUTPUT_LOGSUMEXP: We only need to store the logsumexp if we require grad
+flex_attention_backward_template = TritonTemplate(
+    name="flex_attention_backward",
+    grid=flex_attention_backward_grid,
+    source=r"""
+{{def_kernel("Q", "K", "V", "OUT", "LSE", "DELTA", "DO", "DK", "DV")}}
+    # Sub notation for this kernel:
+    # Q: Query, K: Key, V: Value
+    # M: Number of queries, N: Number of keys/values, D: Model dimension
+    # z: Batch size, h: Number of heads, m: Number of queries per head, k: Number of keys per head
+    # (Modifiable) Config options:
+    # BLOCK_M
+    # BLOCK_N
+    # SCORE_MOD_IS_LINEAR: Is the score modifier linear? If so, we can lift the
+    # change of base out of the loop
+    # ROWS_GUARANTEED_SAFE: Is it guaranteed that at least one value in each row
+    # is not masked out? If so, we can skip an extra safety check
+    # OUTPUT_LOGSUMEXP: We only need to store the logsumexp if we require grad
 
-#     # Define Q Strides
-#     stride_qz = {{stride("Q", 0)}}
-#     stride_qh = {{stride("Q", 1)}}
-#     stride_qm = {{stride("Q", 2)}}
-#     stride_qk = {{stride("Q", 3)}}
-#     # Define K Strides
-#     stride_kz = {{stride("K", 0)}}
-#     stride_kh = {{stride("K", 1)}}
-#     stride_kn = {{stride("K", 2)}}
-#     stride_kk = {{stride("K", 3)}}
-#     # Define V Strides
-#     stride_vz = {{stride("V", 0)}}
-#     stride_vh = {{stride("V", 1)}}
-#     stride_vk = {{stride("V", 2)}}
-#     stride_vn = {{stride("V", 3)}}
+    # TODO DONT LAND TEMP UNBLOCK
+    DQ = out_ptr0
 
-#     Z = {{size("Q", 0)}}
-#     H = {{size("Q", 1)}}
-#     N_CTX = {{size("Q", 2)}}
+    # Define Q Strides
+    stride_qz = {{stride("Q", 0)}}
+    stride_qh = {{stride("Q", 1)}}
+    stride_qm = {{stride("Q", 2)}}
+    stride_qk = {{stride("Q", 3)}}
+    # Define K Strides
+    stride_kz = {{stride("K", 0)}}
+    stride_kh = {{stride("K", 1)}}
+    stride_kn = {{stride("K", 2)}}
+    stride_kk = {{stride("K", 3)}}
+    # Define V Strides
+    stride_vz = {{stride("V", 0)}}
+    stride_vh = {{stride("V", 1)}}
+    stride_vk = {{stride("V", 2)}}
+    stride_vn = {{stride("V", 3)}}
 
-#     qk_scale = 1.0
-#     MATMUL_PRECISION = Q.dtype.element_ty
+    Z = {{size("Q", 0)}}
+    H = {{size("Q", 1)}}
+    N_CTX = {{size("Q", 2)}}
 
-#     # start_m = tl.program_id(0)
-#     # off_hz = tl.program_id(1)
-#     off_hz = tl.program_id(0)
-#     off_z = off_hz // H
-#     off_h = off_hz % H
+    qk_scale = 1.0
+    MATMUL_PRECISION = Q.dtype.element_ty
 
-#     # offset pointers for batch/head
-#     Q += off_z * stride_qz + off_h * stride_qh
-#     K += off_z * stride_kz + off_h * stride_kh
-#     V += off_z * stride_vz + off_h * stride_vh
+    # start_m = tl.program_id(0)
+    # off_hz = tl.program_id(1)
+    off_hz = tl.program_id(0)
+    off_z = off_hz // H
+    off_h = off_hz % H
 
-#     # Asserting contiguous for now...
-#     DO += off_z * stride_qz + off_h * stride_qh
-#     DQ += off_z * stride_qz + off_h * stride_qh
-#     DK += off_z * stride_qz + off_h * stride_qh
-#     DV += off_z * stride_qz + off_h * stride_qh
+    # offset pointers for batch/head
+    Q += off_z * stride_qz + off_h * stride_qh
+    K += off_z * stride_kz + off_h * stride_kh
+    V += off_z * stride_vz + off_h * stride_vh
 
-#     # initialize row/col offsets
-#     offs_m = tl.arange(0, BLOCK_N)
-#     offs_k = tl.arange(0, BLOCK_DMODEL)
+    # Asserting contiguous for now...
+    DO += off_z * stride_qz + off_h * stride_qh
+    DQ += off_z * stride_qz + off_h * stride_qh
+    DK += off_z * stride_qz + off_h * stride_qh
+    DV += off_z * stride_qz + off_h * stride_qh
 
-#     for start_n in range(0, NUM_Q_BLOCKS):
-#         offs_qm = lo + tl.arange(0, BLOCK_M)
-#         offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_M)
+    # initialize row/col offsets
+    offs_m = tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_DMODEL)
 
-#         # initialize pointers to value-like data
-#         q_ptrs = Q + (offs_qm[:, None] * stride_qm + offs_k[None, :] * stride_qk)
-#         k_ptrs = K + (offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
-#         v_ptrs = V + (offs_n[:, None] * stride_qm + offs_k[None, :] * stride_qk)
-#         do_ptrs = DO + (offs_qm[:, None] * stride_qm + offs_k[None, :] * stride_qk)
-#         dq_ptrs = DQ + (offs_qm[:, None] * stride_qm + offs_k[None, :] * stride_qk)
+    for start_n in range(0, NUM_Q_BLOCKS):
+        # We are not doing the causal optimization yet allowing us to start further down the
+        # kv column
+        offs_qm = tl.arange(0, BLOCK_M)
+        offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_M)
 
-#         # pointer to row-wise quantities in value-like data
-#         D_ptrs = DELTA + off_hz * N_CTX
-#         l_ptrs = LSE + off_hz * N_CTX
+        # initialize pointers to value-like data
+        q_ptrs = Q + (offs_qm[:, None] * stride_qm + offs_k[None, :] * stride_qk)
+        k_ptrs = K + (offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
+        v_ptrs = V + (offs_n[:, None] * stride_qm + offs_k[None, :] * stride_qk)
+        do_ptrs = DO + (offs_qm[:, None] * stride_qm + offs_k[None, :] * stride_qk)
+        dq_ptrs = DQ + (offs_qm[:, None] * stride_qm + offs_k[None, :] * stride_qk)
 
-#         # initialize dv amd dk
-#         dv = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
-#         dk = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+        # pointer to row-wise quantities in value-like data
+        D_ptrs = DELTA + off_hz * N_CTX
+        l_ptrs = LSE + off_hz * N_CTX
 
-#         # Key and Value stay in SRAM throughout
-#         k = tl.load(k_ptrs)
-#         v = tl.load(v_ptrs)
+        # initialize dv amd dk
+        dv = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+        dk = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
-#         for start_m in range(0, num_block * BLOCK_M, BLOCK_M):
-#             offs_m_curr = start_m + offs_m
+        # Key and Value stay in SRAM throughout
+        k = tl.load(k_ptrs)
+        v = tl.load(v_ptrs)
 
-#             # load q, k, v, do on-chip
-#             q = tl.load(q_ptrs)
+        for start_m in range(0, NUM_Q_BLOCKS * BLOCK_M, BLOCK_M):
+            offs_m_curr = start_m + offs_m
 
-#             # -- compute qk ---
-#             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-#             qk = tl.dot(q, k.to(MATMUL_PRECISION), acc=qk)
-#             # ~~~~~~~~~~~~~~~~~~~ Apply score modification  ~~~~~~~~~~~~~~~~~~~
-#             m = offs_m_curr[:, None]
-#             n = start_n + offs_n[None, :]
-#             {{ modification(
-#                 score="qk",
-#                 b="off_hz // H",
-#                 h="off_hz % H",
-#                 m="m",
-#                 n="n",
-#                 out="qk"
-#             ) | indent_except_first(4) }}
-#             # TODO: In the case that score_mod is linear, this can be LICMed
-#             if not SCORE_MOD_IS_LINEAR:
-#                 qk *= 1.44269504
-#             # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#             l_i = tl.load(l_ptrs + offs_m_curr)
-#             p = tl.math.exp2(qk - l_i[:, None])
+            # load q, k, v, do on-chip
+            q = tl.load(q_ptrs)
 
-#             # compute dv
-#             do = tl.load(do_ptrs)
-#             dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
+            if SCORE_MOD_IS_LINEAR:
+                qk_scale *= 1.44269504
+            q = (q * qk_scale).to(MATMUL_PRECISION)
 
-#             # compute dp = dot(v, do)
-#             Di = tl.load(D_ptrs + offs_m_curr)
-#             dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
-#             dp += tl.dot(do, tl.trans(v))
+            # -- compute qk ---
+            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+            # qk = tl.dot(q, tl.trans(k.to(MATMUL_PRECISION)), acc=qk)
+            qk += tl.dot(q, tl.trans(k.to(MATMUL_PRECISION)))
+            # ~~~~~~~~~~~~~~~~~~~ Apply score modification  ~~~~~~~~~~~~~~~~~~~
+            m = offs_m_curr[:, None]
+            n = start_n + offs_n[None, :]
+            {{ modification_0(
+                score="qk",
+                b="off_hz // H",
+                h="off_hz % H",
+                m="m",
+                n="n",
+                out="qk"
+            ) | indent_except_first(3) }}
+            # TODO: In the case that score_mod is linear, this can be LICMed
+            if not SCORE_MOD_IS_LINEAR:
+                qk *= 1.44269504
+            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            l_i = tl.load(l_ptrs + offs_m_curr)
+            p = tl.math.exp2(qk - l_i[:, None])
 
-#             # compute ds = p * (dp - delta[:, None])
-#             ds = p * dp
+            # compute dv
+            do = tl.load(do_ptrs)
+            dv += tl.dot(tl.trans(p.to(MATMUL_PRECISION)), do)
 
-#             # ~~~~~~~~~~~~~~~~~~~ Apply joint modification  ~~~~~~~~~~~~~~~~~~~
-#             # TODO FIGURE OUT THE CALL
-#             {{ modification(
-#                 score="qk",
-#                 b="off_z",
-#                 h="off_h",
-#                 m="m",
-#                 n="n",
-#                 out="ds"
-#             ) | indent_except_first(4) }}
-#             # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#             # compute dk = dot(ds.T, q)
-#             dk += tl.dot(tl.trans(ds.to(Q.dtype.element_ty)), q)
-#             # compute dq
-#             dq = tl.load(dq_ptrs)
-#             dq += tl.dot(ds.to(Q.dtype.element_ty), k)
-#             tl.store(dq_ptrs, dq)
-#             # increment pointers
-#             dq_ptrs += BLOCK_M * stride_qm
-#             q_ptrs += BLOCK_M * stride_qm
-#             do_ptrs += BLOCK_M * stride_qm
-#         # write-back
-#         dv_ptrs = DV + (offs_n[:, None] * stride_qm + offs_k[None, :] * stride_qk)
-#         dk_ptrs = DK + (offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
-#         tl.store(dv_ptrs, dv)
-#         tl.store(dk_ptrs, dk)
-#  """,
-# )
+            # compute dp = dot(v, do)
+            Di = tl.load(D_ptrs + offs_m_curr)
+            dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
+            dp += tl.dot(do, tl.trans(v))
+
+            # compute ds = p * (dp - delta[:, None])
+            ds = p * dp
+
+            # ~~~~~~~~~~~~~~~~~~~ Apply joint modification  ~~~~~~~~~~~~~~~~~~~
+            {{ modification_1(
+                score="qk",
+                b="off_z",
+                h="off_h",
+                m="m",
+                n="n",
+                out="ds"
+            ) | indent_except_first(3) }}
+            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            # compute dk = dot(ds.T, q)
+            dk += tl.dot(tl.trans(ds.to(MATMUL_PRECISION)), q)
+            # compute dq
+            dq = tl.load(dq_ptrs)
+            dq += tl.dot(ds.to(MATMUL_PRECISION), k)
+
+
+            # Store output grad_query
+            dummy = tl.zeros()
+            {{ store_output(("dummy", "dummy", "offs_qm", "offs_k"), "dq", indent_width = 12)}}
+
+            # increment pointers
+            dq_ptrs += BLOCK_M * stride_qm
+            q_ptrs += BLOCK_M * stride_qm
+            do_ptrs += BLOCK_M * stride_qm
+        # write-back
+        dv_ptrs = DV + (offs_n[:, None] * stride_qm + offs_k[None, :] * stride_qk)
+        dk_ptrs = DK + (offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
+        tl.store(dv_ptrs, dv)
+        tl.store(dk_ptrs, dk)
+ """,
+)
 
 
 # TODO: We probably also need a layout constraint?
@@ -572,25 +584,30 @@ def flex_attention_backward(*args, **kwargs):
     )
 
     joint_placeholder_inps = fwd_placeholder_inps + [
-        create_placeholder("grad_score_mod", dtype, device)
+        create_placeholder("out", dtype, device)
     ]
     joint_subgraph_buffer = build_subgraph_buffer(
         args, joint_placeholder_inps, joint_graph, is_joint_graph=True
     )
 
-    # layout = FixedLayout(
-    #     query.get_device(),
-    #     query.get_dtype(),
-    #     query.get_size(),
-    #     make_contiguous_strides_for(query.get_size()),
-    # )
+    layout = FixedLayout(
+        query.get_device(),
+        query.get_dtype(),
+        query.get_size(),
+        make_contiguous_strides_for(query.get_size()),
+    )
+
+    # Create delta which will is needed for the bwd's kernel
+    mul_delta = lowerings[aten.mul](out, grad_out)
+    delta = lowerings[aten.sum](mul_delta, axis=-1)
+
     # see NOTE:[TritonTemplates with multiple outputs]
-    grad_query = empty_strided(query.get_size(), None, dtype=dtype, device=device)
+    # grad_query = empty_strided(query.get_size(), None, dtype=dtype, device=device)
     grad_key = empty_strided(key.get_size(), None, dtype=dtype, device=device)
     grad_value = empty_strided(value.get_size(), None, dtype=dtype, device=device)
 
     choices: List[Any] = []
-    configs: List[Any] = []
+    configs: List[Tuple[int, int, int, int]] = []
     configs.append(_get_default_config(query))
     if config.max_autotune:
         configs += [
@@ -604,26 +621,46 @@ def flex_attention_backward(*args, **kwargs):
     # because they're implicitly added by the score_mod function
     # We do need to explicitly pass it in for autotuning though.
     for BLOCK_M, BLOCK_N, num_warps, num_stages in configs:
-        flex_attention_template.maybe_append_choice(
+        flex_attention_backward_template.maybe_append_choice(
             choices=choices,
-            input_nodes=[query, key, value, logsumexp],
-            # layout=layout,
-            subgraphs=[fw_subgraph_buffer, joint_subgraph_buffer],
-            mutated_inputs=[
+            input_nodes=[
+                query,
+                key,
+                value,
+                out,
                 logsumexp,
+                delta,
+                grad_out,
+                grad_key,
+                grad_value,
             ],
+            layout=layout,
+            subgraphs=[fw_subgraph_buffer, joint_subgraph_buffer],
+            mutated_inputs=[grad_key, grad_value],
             num_stages=num_stages,
             num_warps=num_warps,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_DMODEL=query.get_size()[-1],
+            NUM_Q_BLOCKS=math.ceil(query.get_size()[-2] / BLOCK_M),
             # For now, we always assume the "sound" option
             SCORE_MOD_IS_LINEAR=False,
             ROWS_GUARANTEED_SAFE=False,
             OUTPUT_LOGSUMEXP=True,
         )
-    inputs_for_autotuning = [query, key, value, logsumexp] + list(other_buffers)
-    return (
-        autotune_select_algorithm("sdpa", choices, inputs_for_autotuning),
+    inputs_for_autotuning = [
+        query,
+        key,
+        value,
+        out,
         logsumexp,
+        delta,
+        grad_out,
+        grad_key,
+        grad_value,
+    ] + list(other_buffers)
+    return (
+        autotune_select_algorithm("sdpa", choices, inputs_for_autotuning, layout),
+        grad_key,
+        grad_value,
     )
