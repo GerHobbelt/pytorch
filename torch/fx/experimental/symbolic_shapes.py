@@ -4017,6 +4017,7 @@ class ShapeEnv:
         add_expr(e)
         # Other relational expressions this expression implies
         if isinstance(e, sympy.Eq):
+            add_expr(sympy.Eq(e.rhs, e.lhs))
             add_expr(sympy.Le(e.lhs, e.rhs))
             add_expr(sympy.Ge(e.lhs, e.rhs))
         elif isinstance(e, sympy.Lt):
