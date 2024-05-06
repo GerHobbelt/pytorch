@@ -46,13 +46,16 @@ def build_subgraph_buffer(
     args: Tuple[IRNode],
     placeholder_inps: List[TensorBox],
     subgraph: Subgraph,
-):
+    is_joint_graph: bool,
+) -> ComputedBuffer:
     """This function's goal is to take in the required args and produce the subgraph buffer
+    The subgraph buffer is a ComputedBuffer that will be inlined into the triton template
 
     Args:
         args: The args that were passed into the flex_attention kernel
         subgraph: The Subgraph ir for which to produce the output node
         placeholder_inps: The list of scalar inputs, these were created on the fly through `create_placeholder`
+        is_joint_graph: Whether or not this subgraph represents the joint graph
     """
     cnt = 0
     env = {}
@@ -79,7 +82,11 @@ def build_subgraph_buffer(
         elif node.op == "output":
             # For the output node we need to create a ComputedBuffer
             # which represents the actual score modification
-            output_buffer = env[node.args[0]]
+            # TODO confirm why For the joint graph we expect the output nodes args to be
+            # be of the form: ([mul_1, None, None, None],) so we need to get the first
+            # ([mul_1, None, None, None, None],)
+            output_node = node.args[0] if not is_joint_graph else node.args[0][0]
+            output_buffer = env[output_node]
             assert isinstance(output_buffer, TensorBox), (
                 "The output node  for flex attnetion's subgraph must be a TensorBox, but got: ",
                 type(output_buffer),
@@ -200,7 +207,7 @@ flex_attention_template = TritonTemplate(
         # ~~~~~~~~~~~~~~~~~~~ Apply score modification  ~~~~~~~~~~~~~~~~~~~
         m = offs_m[:, None]
         n = start_n + offs_n[None, :]
-        {{ modification(
+        {{ modification_0(
             score="qk",
             b="off_hz // H",
             h="off_hz % H",
@@ -302,7 +309,9 @@ def flex_attention(*args, **kwargs):
             ("n", torch.int32),
         ]
     ]
-    subgraph_buffer = build_subgraph_buffer(args, placeholder_inps, subgraph)
+    subgraph_buffer = build_subgraph_buffer(
+        args, placeholder_inps, subgraph, is_joint_graph=False
+    )
     layout = FixedLayout(
         query.get_device(),
         query.get_dtype(),
@@ -336,7 +345,9 @@ def flex_attention(*args, **kwargs):
             choices=choices,
             input_nodes=[query, key, value, logsumexp],
             layout=layout,
-            subgraphs=subgraph_buffer,
+            subgraphs=[
+                subgraph_buffer,
+            ],
             mutated_inputs=[
                 logsumexp,
             ],
@@ -543,35 +554,41 @@ def flex_attention_backward(*args, **kwargs):
         *other_buffers,
     ) = args
 
+    device = query.get_device()
+    dtype = query.get_dtype()
+
     fwd_placeholder_inps = [
-        create_placeholder(name, dtype, query.get_device())
+        create_placeholder(name, dtype, device)
         for name, dtype in [
-            ("score", query.get_dtype()),
+            ("score", dtype),
             ("b", torch.int32),
             ("h", torch.int32),
             ("m", torch.int32),
             ("n", torch.int32),
         ]
     ]
-    fw_subgraph_buffer = build_subgraph_buffer(args, fwd_placeholder_inps, fw_graph)
-
-    joint_placeholder_inps = fwd_placeholder_inps + [create_placeholder("grad_score_mod", query.get_dtype(), query.get_device())]
-    joint_subgraph_buffer = build_subgraph_buffer(args, joint_placeholder_inps, joint_graph)
-
-    layout = FixedLayout(
-        query.get_device(),
-        query.get_dtype(),
-        query.get_size(),
-        make_contiguous_strides_for(query.get_size()),
+    fw_subgraph_buffer = build_subgraph_buffer(
+        args, fwd_placeholder_inps, fw_graph, is_joint_graph=False
     )
+
+    joint_placeholder_inps = fwd_placeholder_inps + [
+        create_placeholder("grad_score_mod", dtype, device)
+    ]
+    joint_subgraph_buffer = build_subgraph_buffer(
+        args, joint_placeholder_inps, joint_graph, is_joint_graph=True
+    )
+
+    # layout = FixedLayout(
+    #     query.get_device(),
+    #     query.get_dtype(),
+    #     query.get_size(),
+    #     make_contiguous_strides_for(query.get_size()),
+    # )
     # see NOTE:[TritonTemplates with multiple outputs]
-    logsumexp_shape = query.get_size()[:-1]  # [B, H, M]
-    logsumexp = empty_strided(
-        logsumexp_shape,
-        None,
-        dtype=torch.float32,  # The logsumexp is always stored in fp32 regardless of the input dtype
-        device=query.get_device(),
-    )
+    grad_query = empty_strided(query.get_size(), None, dtype=dtype, device=device)
+    grad_key = empty_strided(key.get_size(), None, dtype=dtype, device=device)
+    grad_value = empty_strided(value.get_size(), None, dtype=dtype, device=device)
+
     choices: List[Any] = []
     configs: List[Any] = []
     configs.append(_get_default_config(query))
@@ -590,8 +607,8 @@ def flex_attention_backward(*args, **kwargs):
         flex_attention_template.maybe_append_choice(
             choices=choices,
             input_nodes=[query, key, value, logsumexp],
-            layout=layout,
-            subgraphs=subgraph_buffer,
+            # layout=layout,
+            subgraphs=[fw_subgraph_buffer, joint_subgraph_buffer],
             mutated_inputs=[
                 logsumexp,
             ],
@@ -607,6 +624,6 @@ def flex_attention_backward(*args, **kwargs):
         )
     inputs_for_autotuning = [query, key, value, logsumexp] + list(other_buffers)
     return (
-        autotune_select_algorithm("sdpa", choices, inputs_for_autotuning, layout),
+        autotune_select_algorithm("sdpa", choices, inputs_for_autotuning),
         logsumexp,
     )

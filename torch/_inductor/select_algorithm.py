@@ -101,7 +101,7 @@ class TritonTemplateKernel(TritonKernel):
         prefix_args=0,
         suffix_args=0,
         epilogue_fn=identity,
-        subgraphs=None,
+        subgraphs: Optional[List[ir.ComputedBuffer]] = None,
         *,
         index_dtype,
     ):
@@ -112,7 +112,7 @@ class TritonTemplateKernel(TritonKernel):
         )
         self.input_nodes = input_nodes
         self.output_node = output_node
-        self.named_input_nodes = {}
+        self.named_input_nodes = {}  # type: ignore[var-annotated]
         self.defines = defines
         self.kernel_name = kernel_name
         self.template_mask = None
@@ -126,10 +126,10 @@ class TritonTemplateKernel(TritonKernel):
         self.prefix_args = prefix_args
         self.suffix_args = suffix_args
         self.epilogue_fn = epilogue_fn
-        self.render_hooks = dict()
+        self.render_hooks = dict()  # type: ignore[var-annotated]
         self.triton_meta: Optional[Dict[str, object]] = None
-        # For Templated Attention
-        self.subgraphs = subgraphs
+        # For Templated Attention this can be a list of ir.Subgraph
+        self.subgraphs: Optional[List[ir.ComputedBuffer]] = subgraphs
 
     def need_numel_args(self):
         return False
@@ -269,49 +269,74 @@ class TritonTemplateKernel(TritonKernel):
             val = self.named_input_nodes[name].get_stride()[index]
         return texpr(self.rename_indexing(val))
 
-    def modification(self, **fixed_inputs) -> str:
-        """This function generates the code body to populate
-        a 'modification' placeholder within a template
+    def build_modifications(self) -> Optional[List[Tuple[str, Callable[..., str]]]]:
+        """This function generates the code body to populate a 'modification_<i>' placeholder within a template
 
-        TODO come up with standardized way to modify templates, with
-        potential multiple modifications
+        This returns a tuple of ('modification_<i>, modification_string) that will be used in the jinja template
+        """
+        # If there are no subgraphs, then we dont expect any modifications
+        if not self.subgraphs:
+            return None
+        output_tuples = []
+        for idx, subgraph in enumerate(self.subgraphs):
+            fn_name = f"modification_{idx}"
+            mod_fn = self.create_modification(subgraph, idx)
+            output_tuples.append((fn_name, mod_fn))
+
+        return output_tuples
+
+    def create_modification(
+        self, subgraph: ir.ComputedBuffer, number: int
+    ) -> Callable[..., str]:
+        """This creates a modification function for a subgraph.
+
+        Args:
+            subgraph (ir.ComputedBuffer): The ComputedBuffer representing the inlined subgraph
+            number (int): The index of the modification function represting `modification_<number>`
+                in template code.
+
         """
 
-        def add_input(name):
-            return self.args.input(name)
+        def modification(**fixed_inputs) -> str:
+            def add_input(name):
+                return self.args.input(name)
 
-        class PlaceholderSubstitution(V.WrapperHandler):  # type: ignore[name-defined]
-            self.name = "PlaceholderSubstitution"
+            name = f"PlaceholderSubstitution_{number}"
 
-            def load(self, name: str, index: sympy.Expr):
-                if name not in fixed_inputs:
-                    # If it's not a fixed input, it's a load from a captured
-                    # tensor
-                    var = add_input(name)
-                    return f"tl.load({var} + {index})"
+            class PlaceholderSubstitution(V.WrapperHandler):  # type: ignore[name-defined]
+                self.name = name
 
-                return f"({fixed_inputs[name]})"
+                def load(self, name: str, index: sympy.Expr):
+                    if name not in fixed_inputs:
+                        # If it's not a fixed input, it's a load from a captured
+                        # tensor
+                        var = add_input(name)
+                        return f"tl.load({var} + {index})"
 
-            def indirect_indexing(self, index_var, size, check):
-                return sympy_index_symbol(str(index_var))
+                    return f"({fixed_inputs[name]})"
 
-        # if self.modification_cache is None:
-        with V.set_ops_handler(PlaceholderSubstitution(V.ops)):
-            assert isinstance(
-                self.subgraphs, ir.ComputedBuffer
-            ), "Expected the subgraph to be a ComputedBuffer"
-            if isinstance(self.subgraphs.data, ir.InputBuffer):
-                out = self.subgraphs.data.make_loader()((1,))
-            else:
-                out = self.subgraphs.data.inner_fn((1,))
+                def indirect_indexing(self, index_var, size, check):
+                    return sympy_index_symbol(str(index_var))
 
-        self.codegen_body()
-        self.body.writeline(f"{fixed_inputs['out']} = {out.value}")
+            with V.set_ops_handler(PlaceholderSubstitution(V.ops)):
+                assert isinstance(
+                    subgraph, ir.ComputedBuffer
+                ), "Expected the subgraph to be a ComputedBuffer"
+                if isinstance(subgraph.data, ir.InputBuffer):
+                    out = subgraph.data.make_loader()((1,))
+                else:
+                    out = subgraph.data.inner_fn((1,))
 
-        body_val = self.body.getvalue()
-        self.body.clear()
-        self.cse.invalidate(set())
-        return body_val
+            self.codegen_body()
+            self.body.writeline(f"{fixed_inputs['out']} = {out.value}")
+
+            body_val = self.body.getvalue()
+            self.body.clear()
+            self.cse.invalidate(set())
+            return body_val
+
+        # Return the modfication callable
+        return modification
 
     def store_output(
         self,
@@ -346,7 +371,7 @@ class TritonTemplateKernel(TritonKernel):
         self.range_trees[0].lookup(sympy.Integer(1), sympy_product(lengths)).set_name(
             "xindex"
         )
-        self.template_mask = mask
+        self.template_mask = mask  # type: ignore[assignment]
         self.template_indices = indices
         output_index = self.output_node.get_layout().make_indexer()(index_symbols)
         output_index = self.rename_indexing(output_index)
@@ -403,7 +428,7 @@ class TritonTemplateKernel(TritonKernel):
         """
         Generate the namespace visible in the template.
         """
-        return {
+        base_env = {
             fn.__name__: fn
             for fn in [
                 self.def_kernel,
@@ -411,9 +436,17 @@ class TritonTemplateKernel(TritonKernel):
                 self.stride,
                 self.store_output,
                 self.make_load,
-                self.modification,
             ]
         }
+
+        # Since there is potentially an arbitrary number of subgraphs,
+        # we need to generate a unique name for each one.
+        modification_funcs = self.build_modifications()
+        if modification_funcs is not None:
+            for name, function in modification_funcs:
+                base_env[name] = function
+
+        return base_env
 
     def indexing(
         self,
