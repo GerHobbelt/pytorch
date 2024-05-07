@@ -443,14 +443,14 @@ flex_attention_backward_template = TritonTemplate(
     DV += off_z * stride_qz + off_h * stride_qh
 
     # initialize row/col offsets
-    offs_m = tl.arange(0, BLOCK_N)
+    offs_m = tl.arange(0, BLOCK_M)
     offs_k = tl.arange(0, BLOCK_DMODEL)
 
     for start_n in range(0, NUM_Q_BLOCKS):
         # We are not doing the causal optimization yet allowing us to start further down the
         # kv column
         offs_qm = tl.arange(0, BLOCK_M)
-        offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_N)
 
         # initialize pointers to value-like data
         q_ptrs = Q + (offs_qm[:, None] * stride_qm + offs_k[None, :] * stride_qk)
@@ -483,8 +483,7 @@ flex_attention_backward_template = TritonTemplate(
 
             # -- compute qk ---
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            # qk = tl.dot(q, tl.trans(k.to(MATMUL_PRECISION)), acc=qk)
-            qk += tl.dot(q, tl.trans(k.to(MATMUL_PRECISION)))
+            qk = tl.dot(q, tl.trans(k.to(MATMUL_PRECISION)), acc=qk)
             # ~~~~~~~~~~~~~~~~~~~ Apply score modification  ~~~~~~~~~~~~~~~~~~~
             m = offs_m_curr[:, None]
             n = start_n + offs_n[None, :]
@@ -645,8 +644,6 @@ def flex_attention_backward(*args, **kwargs):
             NUM_Q_BLOCKS=math.ceil(query.get_size()[-2] / BLOCK_M),
             # For now, we always assume the "sound" option
             SCORE_MOD_IS_LINEAR=False,
-            ROWS_GUARANTEED_SAFE=False,
-            OUTPUT_LOGSUMEXP=True,
         )
     inputs_for_autotuning = [
         query,
