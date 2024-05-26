@@ -2385,7 +2385,6 @@ def embedding_bag(
             "Argument order of nn.functional.embedding_bag was changed. "
             "Usage `embedding_bag(weight, input, ...)` is deprecated, "
             "and should now be `embedding_bag(input, weight, ...)`.",
-            FutureWarning,
         )
         weight, input = input, weight
 
