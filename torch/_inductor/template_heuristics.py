@@ -279,7 +279,7 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
             # Each warp computes a 16x16 tile = 256 elements
             num_warps = min(num_warps, block_m * block_n // 256)
 
-            if (block_m, block_n, block_k, num_stages, num_warps, 0) not in used and (
+            if (Config(block_m, block_n, block_k, num_stages, num_warps) not in used and (
                 max_mm_configs is None or len(used) < max_mm_configs
             ):
                 used.add(Config(block_m, block_n, block_k, num_stages, num_warps))
@@ -488,11 +488,13 @@ class ROCmConfigHeuristic(BaseConfigHeuristic):
                     #  block_m and block_n must be a multiple of matrix_instr_nonkdim
                     continue
                 if (
-                    block_m,
-                    block_n,
-                    block_k,
-                    num_stages,
-                    num_warps,
+                    Config(
+                        block_m,
+                        block_n,
+                        block_k,
+                        num_stages,
+                        num_warps,
+                    )
                     matrix_instr_nonkdim,
                 ) not in used and (
                     max_mm_configs is None or len(used) < max_mm_configs
