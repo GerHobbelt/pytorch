@@ -468,7 +468,7 @@ class ROCmConfigHeuristic(BaseConfigHeuristic):
                         block_k,
                         num_stages,
                         num_warps,
-                    )
+                    ),
                     matrix_instr_nonkdim,
                 ) not in used and (
                     max_mm_configs is None or len(used) < max_mm_configs
