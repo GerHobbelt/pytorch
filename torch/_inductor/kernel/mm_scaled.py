@@ -502,6 +502,7 @@ def tuned_scaled_mm(
     m, n, k, layout, mat_a, mat_b = mm_args(
         mat_a, mat_b, layout=layout, out_dtype=out_dtype
     )
+    device_type = get_device_type(mat_a)
 
     check_supported_striding(mat_a, mat_b)
 
@@ -527,8 +528,10 @@ def tuned_scaled_mm(
 
     _, is_nonzero = _is_static_problem(layout)
 
-    scaled_mm_configs = V.choices.get_scaled_mm_configs()
-    scaled_persistent_mm_configs = V.choices.get_scaled_persistent_mm_configs()
+    scaled_mm_configs = V.choices.get_scaled_mm_configs(device_type)
+    scaled_persistent_mm_configs = V.choices.get_scaled_persistent_mm_configs(
+        device_type
+    )
 
     if is_nonzero and use_triton_template(layout, enable_float8=True):
         if use_persistent_tma(k, bias is not None):
