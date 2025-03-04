@@ -279,7 +279,7 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
             # Each warp computes a 16x16 tile = 256 elements
             num_warps = min(num_warps, block_m * block_n // 256)
 
-            if (Config(block_m, block_n, block_k, num_stages, num_warps) not in used and (
+            if (Config(block_m, block_n, block_k, num_stages, num_warps)) not in used and (
                 max_mm_configs is None or len(used) < max_mm_configs
             ):
                 used.add(Config(block_m, block_n, block_k, num_stages, num_warps))
