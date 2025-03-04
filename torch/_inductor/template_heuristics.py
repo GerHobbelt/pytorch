@@ -410,32 +410,6 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
     def get_conv_configs(self) -> partial[Generator[TritonConfig, None, None]]:
         return partial(self.preprocess_mm_configs, configs=self.conv_configs)
 
-    def generate_mixed_mm_config(self, m: int, n: int, k: int) -> TritonConfig:
-        if m <= 16 and n >= 4096 and k >= 4096:
-            return self.triton_config(
-                BLOCK_M=16,
-                BLOCK_N=64,
-                BLOCK_K=128,
-                num_stages=5,
-                num_warps=4,
-            )
-        elif m > 16 and m <= 32 and n >= 4096 and k >= 4096:
-            return self.triton_config(
-                BLOCK_M=32,
-                BLOCK_N=32,
-                BLOCK_K=128,
-                num_stages=5,
-                num_warps=4,
-            )
-        elif m > 32 and m <= 64 and n >= 4096 and k >= 4096:
-            return self.triton_config(
-                BLOCK_M=64,
-                BLOCK_N=32,
-                BLOCK_K=128,
-                num_stages=5,
-                num_warps=4,
-            )
-
 
 class CPUConfigHeuristic(BaseConfigHeuristic):
     pass
@@ -583,32 +557,6 @@ class ROCmConfigHeuristic(BaseConfigHeuristic):
             self.conv_configs, self.default_num_stages
         )
         return partial(self.preprocess_mm_configs, configs=filtered_configs)
-
-    def generate_mixed_mm_config(self, m: int, n: int, k: int) -> TritonConfig:
-        if m <= 16 and n >= 4096 and k >= 4096:
-            return self.triton_config(
-                BLOCK_M=16,
-                BLOCK_N=64,
-                BLOCK_K=128,
-                num_stages=self.default_num_stages,
-                num_warps=4,
-            )
-        elif m > 16 and m <= 32 and n >= 4096 and k >= 4096:
-            return self.triton_config(
-                BLOCK_M=32,
-                BLOCK_N=32,
-                BLOCK_K=128,
-                num_stages=self.default_num_stages,
-                num_warps=4,
-            )
-        elif m > 32 and m <= 64 and n >= 4096 and k >= 4096:
-            return self.triton_config(
-                BLOCK_M=64,
-                BLOCK_N=32,
-                BLOCK_K=128,
-                num_stages=self.default_num_stages,
-                num_warps=4,
-            )
 
 
 class XPUConfigHeuristic(BaseConfigHeuristic):

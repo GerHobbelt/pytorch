@@ -735,27 +735,6 @@ def dims_are_int(dims):
     return all(isinstance(dim, int) for dim in dims)
 
 
-def try_heuristic(m, n, k, choices, mat1, mat2, mat2_dtype, layout, mm_heuristic):
-    m, n, k = get_size_hints(mat1, mat2, m, n, k)
-    if not dims_are_int([m, n, k]):
-        return None
-
-    if mat1.dtype != torch.float16:
-        return None
-
-    # only use heuristic if we are running on an A100
-    # torch.cuda.get_device_capability() >= (8, 0) returns true for A10G
-    # which does not have enough shared memory for one of the configs
-    if (
-        not torch.cuda.get_device_capability() >= (8, 0)
-    ) or get_gpu_shared_memory() != 166912:
-        return None
-    elif m == 1 and (n % 16 != 0 or k % 16 != 0):
-        return None
-    else:
-        return mm_heuristic.generate_mixed_mm_config()
-
-
 def mm_autoheuristic(
     mat1,
     mat2,
