@@ -472,6 +472,7 @@ void gemm_core_(
             kHalf, kBFloat16,                            \
             TYPE, NAME, __VA_ARGS__)
 #endif
+__ubsan_ignore_undefined__
 void cpublas_gemm_impl(
     at::ScalarType type,
     TransposeType transa, TransposeType transb,
