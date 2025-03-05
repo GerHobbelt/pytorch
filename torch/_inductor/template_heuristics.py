@@ -313,7 +313,7 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
         m = max(
             next_power_of_2(
                 V.graph.sizevars.size_hint(
-                    m, 
+                    m,
                     fallback=config.unbacked_symint_fallback,  # type: ignore[arg-type]
                 )
             ),
@@ -322,7 +322,7 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
         n = max(
             next_power_of_2(
                 V.graph.sizevars.size_hint(
-                    n, 
+                    n,
                     fallback=config.unbacked_symint_fallback,  # type: ignore[arg-type]
                 )
             ),
@@ -331,7 +331,7 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
         k = max(
             next_power_of_2(
                 V.graph.sizevars.size_hint(
-                    k, 
+                    k,
                     fallback=config.unbacked_symint_fallback,  # type: ignore[arg-type]
                 )
             ),
