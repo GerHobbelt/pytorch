@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import itertools
 from collections import namedtuple
+from collections.abc import Generator, Sequence
 from functools import partial
 from threading import Lock
-from typing import Any, Callable, Generator, List, Sequence, Tuple, Type, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from torch.utils._ordered_set import OrderedSet
 
@@ -23,7 +24,7 @@ class BaseConfigSingleton(type):
     to ensure heavy __init__ calls are not repeatedly run
     """
 
-    _instances: dict[Type[Any], Any] = {}
+    _instances: dict[type[Any], Any] = {}
     _lock: Lock = Lock()
 
     def __call__(
@@ -266,7 +267,7 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
 
     def _finalize_mm_configs(
         self,
-        configs: List[Config],
+        configs: list[Config],
     ) -> Generator[TritonConfig, None, None]:
         """
         Finalizes configs after scaling, applying additional constraints.
@@ -279,9 +280,9 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
             # Each warp computes a 16x16 tile = 256 elements
             num_warps = min(num_warps, block_m * block_n // 256)
 
-            if (Config(block_m, block_n, block_k, num_stages, num_warps)) not in used and (
-                max_mm_configs is None or len(used) < max_mm_configs
-            ):
+            if (
+                Config(block_m, block_n, block_k, num_stages, num_warps)
+            ) not in used and (max_mm_configs is None or len(used) < max_mm_configs):
                 used.add(Config(block_m, block_n, block_k, num_stages, num_warps))
                 yield self.triton_config(
                     BLOCK_M=block_m,
@@ -300,7 +301,7 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
         scale: float,
         has_int8_tensor: bool,
         exclude: Callable[[int, int, int], bool],
-    ) -> List[Config]:
+    ) -> list[Config]:
         """
         Scales and filters matrix multiplication configs based on input size.
         """
@@ -312,7 +313,8 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
         m = max(
             next_power_of_2(
                 V.graph.sizevars.size_hint(
-                    m, fallback=config.unbacked_symint_fallback  # type: ignore[arg-type]
+                    m, 
+                    fallback=config.unbacked_symint_fallback,  # type: ignore[arg-type]
                 )
             ),
             min_block_size,
@@ -320,7 +322,8 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
         n = max(
             next_power_of_2(
                 V.graph.sizevars.size_hint(
-                    n, fallback=config.unbacked_symint_fallback  # type: ignore[arg-type]
+                    n, 
+                    fallback=config.unbacked_symint_fallback,  # type: ignore[arg-type]
                 )
             ),
             min_block_size,
@@ -328,7 +331,8 @@ class BaseConfigHeuristic(metaclass=BaseConfigSingleton):
         k = max(
             next_power_of_2(
                 V.graph.sizevars.size_hint(
-                    k, fallback=config.unbacked_symint_fallback  # type: ignore[arg-type]
+                    k, 
+                    fallback=config.unbacked_symint_fallback,  # type: ignore[arg-type]
                 )
             ),
             min_block_size_k,
@@ -436,8 +440,8 @@ class ROCmConfigHeuristic(BaseConfigHeuristic):
         ]
 
     def _filter_configs(
-        self, configs: List[Config], new_num_stages: int
-    ) -> List[Config]:
+        self, configs: list[Config], new_num_stages: int
+    ) -> list[Config]:
         filtered_configs = [
             c._replace(num_stages=self.default_num_stages) for c in configs
         ]
@@ -445,9 +449,9 @@ class ROCmConfigHeuristic(BaseConfigHeuristic):
 
     def _finalize_mm_configs(
         self,
-        configs: List[Config],
+        configs: list[Config],
     ) -> Generator[TritonConfig, None, None]:
-        used = OrderedSet[Tuple[Config, int]]()
+        used = OrderedSet[tuple[Config, int]]()
 
         max_mm_configs = config.test_configs.max_mm_configs
         for block_m, block_n, block_k, num_stages, num_warps in configs:
