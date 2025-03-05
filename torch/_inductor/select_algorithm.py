@@ -289,6 +289,8 @@ class TritonTemplateKernel(TritonKernel):
         grid_fn,
         meta,
         call_sizes,
+        num_consumer_groups=0,
+        num_buffers_warp_spec=0,
         use_jit=False,
         prefix_args=0,
         suffix_args=0,
@@ -312,6 +314,8 @@ class TritonTemplateKernel(TritonKernel):
         self.use_jit = use_jit
         self.num_stages = num_stages
         self.num_warps = num_warps
+        self.num_consumer_groups = num_consumer_groups
+        self.num_buffers_warp_spec = num_buffers_warp_spec
         self.grid_fn = grid_fn
         self.meta = meta
         self.call_sizes = call_sizes
@@ -450,6 +454,8 @@ class TritonTemplateKernel(TritonKernel):
             @triton_heuristics.template(
                 num_stages={self.num_stages},
                 num_warps={self.num_warps},
+                num_consumer_groups={self.num_consumer_groups},
+                num_buffers_warp_spec={self.num_buffers_warp_spec},
                 triton_meta={triton_meta!r},
                 inductor_meta={inductor_meta!r},
             )
@@ -1059,6 +1065,8 @@ class TritonTemplate(KernelTemplate):
         layout,
         num_stages,
         num_warps,
+        num_consumer_groups=0,
+        num_buffers_warp_spec=0,
         prefix_args=0,
         suffix_args=0,
         epilogue_fn=identity,
@@ -1116,6 +1124,8 @@ class TritonTemplate(KernelTemplate):
             "defines": defines,
             "num_stages": num_stages,
             "num_warps": num_warps,
+            "num_consumer_groups": num_consumer_groups,
+            "num_buffers_warp_spec": num_buffers_warp_spec,
             "grid_fn": self.grid,
             "meta": kwargs,
             "call_sizes": call_sizes,
@@ -1154,6 +1164,8 @@ class TritonTemplate(KernelTemplate):
                         ],
                         f"num_stages={num_stages}",
                         f"num_warps={num_warps}",
+                        f"num_consumer_groups={num_consumer_groups}",
+                        f"num_buffers_warp_spec={num_buffers_warp_spec}",
                     ]
                 )
                 + "-"
@@ -1214,6 +1226,8 @@ class TritonTemplate(KernelTemplate):
             extra_args=extra_args,
             num_stages=num_stages,
             num_warps=num_warps,
+            num_consumer_groups=num_consumer_groups,
+            num_buffers_warp_spec=num_buffers_warp_spec,
             matrix_instr_nonkdim=kwargs.get("matrix_instr_nonkdim", 0),
             input_tensor_meta=TensorMeta.from_irnodes(full_input_nodes),  # type: ignore[arg-type]
             output_tensor_meta=TensorMeta.from_irnodes(layout),
