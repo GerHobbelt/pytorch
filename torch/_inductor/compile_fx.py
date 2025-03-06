@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from inspect import currentframe
 from itertools import count
 from typing import Any, Callable, Optional, TYPE_CHECKING, TypeVar, Union
+from typing_extensions import Never, override, ParamSpec, Protocol, TypedDict, Unpack
 from unittest import mock
 
 import torch._inductor.async_compile  # noqa: F401 required to warm up AsyncCompile pools
@@ -88,7 +89,6 @@ from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols, SymExpr
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.monitor import _WaitCounter
 from torch.utils._ordered_set import OrderedSet
-from typing_extensions import Never, override, ParamSpec, Protocol, TypedDict, Unpack
 
 from .._dynamo.backends.common import aot_autograd
 from .._dynamo.exc import ShortenTraceback, SkipFrame
@@ -1084,12 +1084,12 @@ class _InProcessFxCompile(FxCompile):
                     is_inference=is_inference,
                     is_backward=is_backward,
                     const_output_index=const_output_index,
-                    const_wrapper_code=const_wrapper_code.value
-                    if const_wrapper_code
-                    else None,
-                    const_kernel_code=const_kernel_code.value
-                    if const_kernel_code
-                    else None,
+                    const_wrapper_code=(
+                        const_wrapper_code.value if const_wrapper_code else None
+                    ),
+                    const_kernel_code=(
+                        const_kernel_code.value if const_kernel_code else None
+                    ),
                     const_module=const_graph,
                     inputs_to_check=inputs_to_check,
                 )
@@ -1291,7 +1291,7 @@ class _WireProtocolPickledInput:
         from torch.fx._graph_pickler import GraphPickler
 
         fake_mode = _current_fake_mode()
-        result = GraphPickler.loads(self.value, fake_mode)
+        result = GraphPickler.loads(self.value, fake_mode, compiler_name="inductor")
         assert isinstance(result, _WireProtocolInput)
         return result
 
@@ -1328,7 +1328,7 @@ class _WireProtocolPickledOutput:
         from torch.fx._graph_pickler import GraphPickler
 
         fake_mode = _current_fake_mode()
-        result = GraphPickler.loads(self.value, fake_mode)
+        result = GraphPickler.loads(self.value, fake_mode, compiler_name="inductor")
         assert isinstance(result, _WireProtocolOutput)
         if isinstance(result.graph, CompiledFxGraph):
             result.graph.after_deserialization(constants)
@@ -1582,7 +1582,9 @@ def cudagraphify_impl(
         (
             x
             if not isinstance(x, torch.Tensor)
-            else static_input(x) if idx not in static_input_idxs else x.detach()
+            else static_input(x)
+            if idx not in static_input_idxs
+            else x.detach()
         )
         for idx, x in enumerate(inputs)
     ]
