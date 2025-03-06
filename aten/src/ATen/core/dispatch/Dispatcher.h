@@ -714,13 +714,15 @@ inline Return Dispatcher::callWithDispatchKeySlowPath(
       // If we used std::array<IValue, num_boxed_args> here, we would
       // have to spend time default constructing the IValues in
       // boxedArgs. aligned_storage has no such requirement.
-      impl::IValueAlignedStorage boxedArgs[num_boxed_args];
+      // NOLINTNEXTLINE(*array*)
+      alignas(IValue) std::byte boxedArgs[num_boxed_args * sizeof(IValue)];
       // For debugging only; could be removed (but the compiler will do
       // that for us and it's nice to have the extra assurance of
       // correctness from our debug builds).
       int lastArgIdx = 0;
       impl::boxArgsToStack(boxedArgs, lastArgIdx, args...);
-      TORCH_INTERNAL_ASSERT_DEBUG_ONLY(lastArgIdx == num_boxed_args);
+      TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
+          lastArgIdx == num_boxed_args * sizeof(IValue));
       // I don't *think* we need std::launder here, because IValue has
       // no subclasses and no const or reference fields.
       runRecordFunction(
@@ -730,7 +732,7 @@ inline Return Dispatcher::callWithDispatchKeySlowPath(
           dispatchKeySet,
           c10::ArrayRef<const c10::IValue>(
               reinterpret_cast<IValue*>(boxedArgs), num_boxed_args));
-      for (size_t ii = 0; ii < num_boxed_args; ++ii) {
+      for (size_t ii = 0; ii < num_boxed_args; ii += sizeof(IValue)) {
         reinterpret_cast<IValue*>(&boxedArgs[ii])->~IValue();
       }
     } else {
