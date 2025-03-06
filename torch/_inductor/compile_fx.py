@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from inspect import currentframe
 from itertools import count
 from typing import Any, Callable, Optional, TYPE_CHECKING, TypeVar, Union
-from typing_extensions import Never, override, ParamSpec, Protocol, TypedDict, Unpack
 from unittest import mock
 
 import torch._inductor.async_compile  # noqa: F401 required to warm up AsyncCompile pools
@@ -89,6 +88,7 @@ from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols, SymExpr
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.monitor import _WaitCounter
 from torch.utils._ordered_set import OrderedSet
+from typing_extensions import Never, override, ParamSpec, Protocol, TypedDict, Unpack
 
 from .._dynamo.backends.common import aot_autograd
 from .._dynamo.exc import ShortenTraceback, SkipFrame
@@ -1582,9 +1582,7 @@ def cudagraphify_impl(
         (
             x
             if not isinstance(x, torch.Tensor)
-            else static_input(x)
-            if idx not in static_input_idxs
-            else x.detach()
+            else static_input(x) if idx not in static_input_idxs else x.detach()
         )
         for idx, x in enumerate(inputs)
     ]
@@ -2187,7 +2185,7 @@ def compile_fx(
         ) or torch._subclasses.FakeTensorMode(allow_non_fake_inputs=True)
         tracing_context = (
             torch._guards.TracingContext.try_get()
-            or torch._guards.TracingContext(fake_mode)
+            or torch._guards.TracingContext(fake_mode, compiler_name="inductor")
         )
 
         if V.aot_compilation:
