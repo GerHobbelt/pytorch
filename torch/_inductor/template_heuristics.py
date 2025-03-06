@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import itertools
 from collections import namedtuple
-from collections.abc import Generator, Sequence
 from functools import partial
 from threading import Lock
 from typing import Any, Callable, TYPE_CHECKING
@@ -16,7 +15,7 @@ from .virtualized import V
 
 if TYPE_CHECKING:
     from triton import Config as TritonConfig
-
+    from collections.abc import Generator, Sequence
 
 class BaseConfigSingleton(type):
     """
