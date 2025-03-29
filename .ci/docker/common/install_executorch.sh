@@ -47,7 +47,7 @@ setup_executorch() {
   popd
 }
 
-export CMAKE_MINIMUM_REQUIRED_VERSION=3.10
+export CMAKE_POLICY_VERSION_MINIMUM=3.10
 
 clone_executorch
 install_buck2
