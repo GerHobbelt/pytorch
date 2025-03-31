@@ -141,7 +141,6 @@ RUN if [ -n "${TRITON}" ] || [ -n "${TRITON_CPU}" ]; then pip install /opt/trito
 RUN rm -rf /opt/triton
 
 COPY --from=halide-builder      /opt/halide/ /opt/conda/envs/py_${ANACONDA_PYTHON_VERSION}/
-RUN ls /opt/conda/envs/py_${ANACONDA_PYTHON_VERSION}/lib/python3/site-packages/
 COPY --from=executorch-builder  /opt/executorch/ /opt/executorch/
 RUN if [ -n "${EXECUTORCH}" ]; then pip install /opt/executorch/whl/*.whl; mv /opt/executorch/repo /executorch; fi
 RUN chown -R jenkins:jenkins /opt/conda
