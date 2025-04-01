@@ -109,6 +109,8 @@ RUN rm install_inductor_benchmark_deps.sh common_utils.sh timm.txt huggingface.t
 
 ARG TRITON
 ARG TRITON_CPU
+ARG EXECUTORCH
+ARG HALIDE
 
 # Create a separate stage for building Triton and Triton-CPU.  install_triton
 # will check for the presence of env vars
@@ -120,7 +122,6 @@ COPY ci_commit_pins/triton-cpu.txt triton-cpu.txt
 RUN bash ./install_triton.sh
 
 FROM base as executorch-builder
-ARG EXECUTORCH
 # Build and install executorch
 COPY ./common/install_executorch.sh install_executorch.sh
 COPY ./common/common_utils.sh common_utils.sh
@@ -128,7 +129,6 @@ COPY ci_commit_pins/executorch.txt executorch.txt
 RUN if [ -n "${EXECUTORCH}" ]; then bash ./install_executorch.sh; else mkdir /opt/executorch; fi
 
 FROM base as halide-builder
-ARG HALIDE
 # Build and install halide
 COPY ./common/install_halide.sh install_halide.sh
 COPY ./common/common_utils.sh common_utils.sh
