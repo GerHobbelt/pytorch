@@ -78,7 +78,7 @@ static ze_module_handle_t loadModule(std::string& spv_path) {
   auto l0_context =
       sycl::get_native<sycl::backend::ext_oneapi_level_zero>(sycl_context);
 
-  std::ifstream IFS(spv_path.c_str(), std::ios::binary);
+  std::ifstream IFS(spv_path, std::ios::binary);
   std::ostringstream OSS;
   OSS << IFS.rdbuf();
   std::string data(OSS.str());
