@@ -359,6 +359,7 @@ class AsyncCompile:
                 log_pt2_compile_event=True,
                 dynamo_compile_column_us="triton_compile_time_us",
                 log_waitcounter=True,
+                waitcounter_name_override="complie_async_triton",
             ):
                 start_ns = time_ns()
                 _set_triton_ptxas_path()
@@ -444,6 +445,7 @@ class AsyncCompile:
                 log_pt2_compile_event=True,
                 dynamo_compile_column_us="triton_compile_time_us",
                 log_waitcounter=True,
+                waitcounter_name_override="complie_async_triton",
             ):
                 self._wait_futures(scope)
 
