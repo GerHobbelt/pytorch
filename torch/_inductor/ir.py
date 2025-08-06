@@ -570,7 +570,6 @@ class IRNode:
                 ComputedBuffer,
                 InputsKernel,
                 InputBuffer,
-                ReinterpretView,
                 TemplateBuffer,
             ),
         )
@@ -7989,7 +7988,7 @@ class StorageBox(MutableBox):
         )
 
     def realize(self) -> Optional[str]:
-        if IRNode.is_realized_node(self.data):
+        if IRNode.is_realized_node(self.data) or isinstance(self.data, ReinterpretView):
             return self.data.get_name()
 
         assert isinstance(self.data, (Pointwise, Reduction, Scan, Sort)), type(
