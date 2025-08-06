@@ -4181,6 +4181,29 @@ def forward(self, x):
         x = torch.tensor([1, 2])
         self.assertTrue(torch.allclose(mod(x), ep.module()(x)))
 
+    def test_nested_module_fake_tensor_leak(self):
+        class Bar(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._tensor_cache = None
+
+            def forward(self, x):
+                if self._tensor_cache is None:
+                    self._tensor_cache = x + 2
+                return self._tensor_cache.sum() + x.sum()
+
+        class Foo(torch.nn.Module):
+            def __init__(self, bar):
+                super().__init__()
+                self.bar = bar
+
+            def forward(self, x):
+                return self.bar(x)
+
+        foo = Foo(Bar())
+        _ = export(foo, (torch.ones(4, 4),), strict=False)
+        self.assertTrue(foo.bar._tensor_cache is None)
+
     def test_export_for_training_with_container_type(self):
         class Foo(torch.nn.Module):
             def __init__(self) -> None:
