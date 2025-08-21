@@ -11,7 +11,10 @@ import sys
 from subprocess import Popen
 from typing import Any, Optional
 
-from torch.numa.binding import maybe_wrap_command_with_numa_bindings, NumaOptions
+from torch.numa.binding import (
+    maybe_temporarily_apply_numa_binding_to_current_process,
+    NumaOptions,
+)
 
 
 __all__ = ["SubprocessHandler"]
@@ -50,32 +53,31 @@ class SubprocessHandler:
         env_vars.update(env)
 
         args_str = (entrypoint, *[str(e) for e in args])
-        args_str = (
-            maybe_wrap_command_with_numa_bindings(
-                command_args=args_str,
-                gpu_index=local_rank_id,
-                numa_options=numa_options,
-            )
-            or args_str
-        )
 
         self.local_rank_id = local_rank_id
-        self.proc: Popen = self._popen(args_str, env_vars)
+        self.proc: Popen = self._popen(args_str, env_vars, numa_options)
 
-    def _popen(self, args: tuple, env: dict[str, str]) -> Popen:
+    def _popen(
+        self, args: tuple, env: dict[str, str], numa_options: Optional[NumaOptions]
+    ) -> Popen:
         kwargs: dict[str, Any] = {}
         if not IS_WINDOWS:
             kwargs["start_new_session"] = True
-        return Popen(
-            # pyre-fixme[6]: Expected `Union[typing.Sequence[Union[_PathLike[bytes],
-            #  _PathLike[str], bytes, str]], bytes, str]` for 1st param but got
-            #  `Tuple[str, *Tuple[Any, ...]]`.
-            args=args,
-            env=env,
-            stdout=self._stdout,
-            stderr=self._stderr,
-            **kwargs,
-        )
+
+        # See HACK [NUMA inheritance] in spawn.py for context.
+        with maybe_temporarily_apply_numa_binding_to_current_process(
+            gpu_index=self.local_rank_id, numa_options=numa_options
+        ):
+            return Popen(
+                # pyre-fixme[6]: Expected `Union[typing.Sequence[Union[_PathLike[bytes],
+                #  _PathLike[str], bytes, str]], bytes, str]` for 1st param but got
+                #  `Tuple[str, *Tuple[Any, ...]]`.
+                args=args,
+                env=env,
+                stdout=self._stdout,
+                stderr=self._stderr,
+                **kwargs,
+            )
 
     def close(self, death_sig: Optional[signal.Signals] = None) -> None:
         if not death_sig:
