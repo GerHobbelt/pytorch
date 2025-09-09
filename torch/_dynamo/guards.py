@@ -1031,6 +1031,7 @@ class GuardBuilder(GuardBuilderBase):
         self.already_guarded_not_present_in_generic_dict: OrderedSet[
             tuple[str, str]
         ] = OrderedSet()
+        self.guard_tree_values: dict[int, Any] = {}
 
     def guard_on_dict_keys_and_ignore_order(
         self, example_value: dict[Any, Any], guard: Guard
@@ -1324,6 +1325,7 @@ class GuardBuilder(GuardBuilderBase):
 
         if source_name != "":
             example_value = self.get(source_name)
+            self.guard_tree_values[id(example_value)] = example_value
 
         guard_manager_enum = self.get_guard_manager_type(source, example_value)
 
@@ -3077,10 +3079,18 @@ class _Missing:
 
 
 class GuardsStatePickler(pickle.Pickler):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        guard_tree_values: dict[int, Any],
+        empty_values: dict[int, Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.fake_mode = torch._subclasses.FakeTensorMode()
         self.tensor_converter = torch._subclasses.fake_tensor.FakeTensorConverter()
+        self.guard_tree_values = guard_tree_values
+        self.empty_values = empty_values
 
     @classmethod
     def _unpickle_module(cls, state: Any) -> torch.nn.Module:
@@ -3153,6 +3163,18 @@ class GuardsStatePickler(pickle.Pickler):
         return types.MappingProxyType(d)
 
     @classmethod
+    def _unpickle_dict_keys(cls, elems: list[Any]) -> Any:
+        return dict.fromkeys(elems).keys()
+
+    @classmethod
+    def _unpickle_fsdp_module_type(
+        cls, original_type: type[torch.nn.Module]
+    ) -> type[torch.nn.Module]:
+        return torch.distributed.fsdp._fully_shard._fully_shard.get_cls_to_fsdp_cls()[
+            original_type
+        ]
+
+    @classmethod
     def _unpickle_c_op(cls, name: str) -> Any:
         return getattr(torch.ops._C, name)
 
@@ -3161,8 +3183,14 @@ class GuardsStatePickler(pickle.Pickler):
     ) -> Union[tuple[Callable[..., Any], tuple[Any, ...]], Any]:
         import sympy
 
+        if id(obj) in self.empty_values:
+            return type(obj).__new__, (type(obj),)
+
         if isinstance(obj, torch.Tensor) and obj.device.type != "meta":
             from torch.utils._python_dispatch import is_traceable_wrapper_subclass
+
+            if id(obj) not in self.guard_tree_values:
+                return _Missing, ()
 
             if is_traceable_wrapper_subclass(obj):
                 # inner_data is a list of tuples of:
@@ -3173,6 +3201,8 @@ class GuardsStatePickler(pickle.Pickler):
                 # recursively call for inner tensor components
                 for attr in attrs:
                     inner = getattr(obj, attr)
+                    if isinstance(inner, torch.Tensor):
+                        self.guard_tree_values[id(inner)] = inner
                     func, args_tuple = self.reducer_override(inner)
                     inner_data.append((attr, func, args_tuple))
 
@@ -3222,6 +3252,9 @@ class GuardsStatePickler(pickle.Pickler):
         elif isinstance(obj, types.MappingProxyType):
             return type(self)._unpickle_mapping_proxy, (obj.copy(),)
 
+        elif isinstance(obj, type({}.keys())):
+            return type(self)._unpickle_dict_keys, (list(obj),)
+
         elif isinstance(
             obj, torch._ops.OpOverloadPacket
         ) and obj._qualified_op_name.startswith("_C::"):
@@ -3234,14 +3267,27 @@ class GuardsStatePickler(pickle.Pickler):
             # Skipping PyCapsule since there isn't much to be guarded about them.
             return _Missing, ()
 
-        elif isinstance(obj, types.CodeType):
+        elif isinstance(
+            obj,
+            (
+                types.CodeType,
+                torch._C.Stream,
+                torch._C._distributed_c10d.ProcessGroup,
+                weakref.ReferenceType,
+            ),
+        ):
             # We only do ID_MATCH on code objects which is already banned from guards serialization.
             return _Missing, ()
 
-        elif inspect.isfunction(obj) and (obj.__code__.co_flags & inspect.CO_NESTED):
-            # Skipping nested function since CLOSURE_MATCH is banned from guards serialization.
-            assert obj.__qualname__ != obj.__name__
-            return _Missing, ()
+        elif inspect.isfunction(obj):
+            if obj.__code__.co_flags & inspect.CO_NESTED:
+                return _Missing, ()
+            if obj.__module__ in sys.modules:
+                f = sys.modules[obj.__module__]
+                for name in obj.__qualname__.split("."):
+                    f = getattr(f, name, None)  # type: ignore[assignment]
+                if f is not obj:
+                    return _Missing, ()
 
         if type(obj).__qualname__ != type(obj).__name__:
             raise torch._dynamo.exc.PackageError(
@@ -3250,12 +3296,40 @@ class GuardsStatePickler(pickle.Pickler):
                 + "Please define the class at global scope (top level of a module)."
             )
 
+        if isinstance(obj, torch.distributed.distributed_c10d.Work):
+            if id(obj) not in self.guard_tree_values:
+                return _Missing, ()
+
+        if inspect.isclass(obj) and issubclass(
+            obj, torch.distributed.fsdp._fully_shard.FSDPModule
+        ):
+            if obj is not torch.distributed.fsdp._fully_shard.FSDPModule:
+                original_type = obj.__mro__[2]
+                assert issubclass(original_type, torch.nn.Module)
+                assert (
+                    original_type
+                    in torch.distributed.fsdp._fully_shard._fully_shard.get_cls_to_fsdp_cls()
+                )
+                return type(self)._unpickle_fsdp_module_type, (original_type,)
+
         return NotImplemented
 
 
-def pickle_guards_state(state: GuardsState) -> bytes:
+def pickle_guards_state(state: GuardsState, guard_tree_values: dict[int, Any]) -> bytes:
     buf = io.BytesIO()
-    pickler = GuardsStatePickler(buf)
+    empty_values = {}
+
+    leaves = pytree.tree_leaves(state.output_graph.local_scope)
+    for leaf in leaves:
+        if inspect.ismethod(leaf) and hasattr(leaf, "__self__"):
+            base = leaf.__self__
+            if id(base) not in guard_tree_values:
+                try:
+                    type(base).__new__(type(base))
+                    empty_values[id(base)] = base
+                except:  # noqa: E722, B001
+                    pass
+    pickler = GuardsStatePickler(guard_tree_values, empty_values, buf)
     try:
         pickler.dump(state)
     except AttributeError as e:
@@ -3318,8 +3392,15 @@ class CheckFunctionManager:
                     if not keep:
                         ret.append(False)
                     elif (
-                        g.guard_type in ("ID_MATCH", "CLOSURE_MATCH", "WEAKREF_ALIVE")
+                        g.guard_type
+                        in (
+                            "ID_MATCH",
+                            "CLOSURE_MATCH",
+                            "WEAKREF_ALIVE",
+                            "DICT_VERSION",
+                        )
                         or "ID_MATCH" in g.derived_guard_types
+                        or "DICT_VERSION" in g.derived_guard_types
                     ):
                         log.warning(
                             "%s guard on %s is dropped with caching_precompile=True.",
@@ -3608,7 +3689,7 @@ class CheckFunctionManager:
             shape_code_parts=self.shape_code_parts,
         )
 
-        return pickle_guards_state(guards_state)
+        return pickle_guards_state(guards_state, builder.guard_tree_values)
 
     def build_guards(
         self,
