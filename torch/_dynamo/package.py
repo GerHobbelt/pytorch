@@ -33,6 +33,7 @@ from torch._dynamo.exc import PackageError
 from torch._dynamo.precompile_context import PrecompileCacheArtifact, PrecompileContext
 from torch._inductor.runtime.cache_dir_utils import cache_dir
 from torch.compiler._cache import CacheArtifactFactory
+from torch.utils._triton import get_triton_version
 
 from .bytecode_transformation import get_code_keys
 from .utils import dynamo_timed, increment_frame
@@ -271,16 +272,94 @@ def _get_code_source(code: types.CodeType) -> tuple[str, str]:
     return toplevel.__qualname__, code_source.strip(".")
 
 
+@dataclasses.dataclass(frozen=True)
+class SystemInfo:
+    """
+    System information including Python, PyTorch, and GPU details.
+    This information is used to ensure compiled artifacts can only be loaded
+    with compatible system configurations.
+    """
+
+    python_version: str
+    torch_version: str
+    cuda_version: Optional[str]
+    triton_version: Optional[tuple[int, int]]
+    gpu_name: Optional[str]
+
+    @classmethod
+    def current(cls) -> "SystemInfo":
+        """Create a SystemInfo instance with current system information."""
+        # Get GPU name if CUDA is available
+        gpu_name = None
+        if torch.cuda.is_available():
+            try:
+                gpu_name = torch.cuda.get_device_name()
+            except Exception:
+                # If we can't get GPU info, leave as None
+                pass
+
+        return cls(
+            python_version=platform.python_version(),
+            torch_version=torch.__version__,
+            cuda_version=torch.version.cuda,
+            triton_version=get_triton_version((0, 0)),
+            gpu_name=gpu_name,
+        )
+
+    def check_compatibility(self, other: "SystemInfo", use_cuda: bool = False) -> None:
+        """
+        Check if this SystemInfo is compatible with another SystemInfo.
+        Raises RuntimeError if incompatible.
+        """
+        if self.python_version != other.python_version:
+            raise RuntimeError(
+                f"Compile package was created with a different Python version: {self.python_version}"
+            )
+
+        if self.torch_version != other.torch_version:
+            raise RuntimeError(
+                f"Compile package was created with a different PyTorch version: {self.torch_version}"
+            )
+
+        if use_cuda:
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA is not available")
+            if self.cuda_version != other.cuda_version:
+                raise RuntimeError(
+                    f"Compile package was created with a different CUDA version: {self.cuda_version}"
+                )
+
+            if (
+                other.triton_version != (0, 0)
+                and self.triton_version != other.triton_version
+            ):
+                raise RuntimeError(
+                    f"Compile package was created with a different Triton version: {self.triton_version}"
+                )
+
+            # Check GPU name if CUDA was used
+            if other.gpu_name is not None and self.gpu_name != other.gpu_name:
+                raise RuntimeError(
+                    f"Compile package was created with different GPU: "
+                    f"cached={self.gpu_name}, current={other.gpu_name}"
+                )
+
+
 @dataclasses.dataclass
 class _DynamoCacheEntry:
     codes: list[_DynamoCodeCacheEntry]
     inlined_sources: set[InlinedSource]
-    python_version: str = platform.python_version()
-    torch_version: str = torch.__version__
+    use_cuda: bool
+    system_info: SystemInfo = dataclasses.field(default_factory=SystemInfo.current)
 
     @property
     def backend_ids(self) -> set[_BackendId]:
         return {backend_id for code in self.codes for backend_id in code.backend_ids}
+
+    def check_versions(self) -> None:
+        """Check if the current system is compatible with the system used to create this cache entry."""
+        current_system_info = SystemInfo.current()
+        self.system_info.check_compatibility(current_system_info, self.use_cuda)
 
 
 @CacheArtifactFactory.register
@@ -369,6 +448,8 @@ class CompilePackage:
 
         self._current_entry: Optional[_DynamoCodeCacheEntry] = None
         self._installed_globals: dict[types.ModuleType, list[str]] = {}
+        # whether cuda is used
+        self._use_cuda = False
 
         # For debugging/testing purpose only.
         self._cached_backends: dict[_BackendId, Any] = {}
@@ -397,14 +478,7 @@ class CompilePackage:
         assert self._innermost_fn is not None
         if dynamo is not None:
             assert isinstance(dynamo, _DynamoCacheEntry)
-            if dynamo.python_version != platform.python_version():
-                raise RuntimeError(
-                    f"Compile package was created with a different Python version: {dynamo.python_version}"
-                )
-            if dynamo.torch_version != torch.__version__:
-                raise RuntimeError(
-                    f"Compile package was created with a different PyTorch version: {dynamo.torch_version}"
-                )
+            dynamo.check_versions()
             if not ignore_inlined_sources:
                 for code in dynamo.inlined_sources:
                     m = importlib.import_module(code.module)
@@ -534,6 +608,48 @@ class CompilePackage:
                     checksum=_hash_source(source),
                 )
             )
+
+    def update_use_cuda(self, graph: Optional[torch.fx.Graph]) -> None:
+        if graph is None:
+            return
+
+        from torch.utils._pytree import tree_flatten
+
+        def _is_non_cpu(x: Any) -> bool:
+            if isinstance(x, torch.device):
+                return x.type != "cpu"
+            if isinstance(x, torch.Tensor):
+                return x.device.type != "cpu"
+            return False
+
+        def _flatten_meta(node: torch.fx.Node, key: str) -> list[Any]:
+            if key not in node.meta:
+                return []
+            flat, _ = tree_flatten(node.meta[key])
+            return flat
+
+        def graph_uses_non_cpu() -> bool:
+            for node in graph.nodes:
+                for key in ("val", "example_value"):
+                    for obj in _flatten_meta(node, key):
+                        if _is_non_cpu(obj):
+                            return True
+
+                # Check for device conversions
+                if node.op == "call_method":
+                    if node.target == "cuda":
+                        return True
+                    if node.target == "to" and "cuda" in node.args:
+                        return True
+
+                # Check args/kwargs for non-CPU device specs
+                flat_args, _ = tree_flatten((node.args, node.kwargs))
+                for obj in flat_args:
+                    if _is_non_cpu(obj):
+                        return True
+            return False
+
+        self._use_cuda = graph_uses_non_cpu()
 
     def bypass_current_entry(self) -> None:
         assert self._current_entry is not None
@@ -671,7 +787,9 @@ class CompilePackage:
     def cache_entry(self) -> _DynamoCacheEntry:
         self.validate()
         return _DynamoCacheEntry(
-            codes=list(self._codes.values()), inlined_sources=self._inlined_sources
+            codes=list(self._codes.values()),
+            inlined_sources=self._inlined_sources,
+            use_cuda=self._use_cuda,
         )
 
     @staticmethod
