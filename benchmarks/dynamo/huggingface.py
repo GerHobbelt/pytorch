@@ -561,8 +561,7 @@ class HuggingfaceRunner(BenchmarkRunner):
     def forward_pass(self, mod, inputs, collect_outputs=True):
         with self.autocast(**self.autocast_arg):
             res = mod(**inputs)
-        if self.hf_llm:
-            return res.logits
+        return res.logits if self.hf_llm else res
 
     def forward_and_backward_pass(self, mod, inputs, collect_outputs=True):
         cloned_inputs = clone_inputs(inputs)
