@@ -831,6 +831,43 @@ class JsonProfile:
 
         return chain
 
+    def _find_connected_kernels(self, dag: TraceDAG, op_node_name: str) -> list[str]:
+        """
+        Find all kernel nodes that are reachable from the given operation node.
+        Uses BFS to traverse the DAG and collect all connected kernels.
+        """
+        visited = set()
+        kernel_nodes = []
+        queue = [op_node_name]
+
+        print(f"DEBUG: Finding connected kernels for op: {op_node_name}")
+        print(f"DEBUG: Total edges in DAG: {len(dag.edges)}")
+
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            print(f"DEBUG: Processing node: {current}")
+
+            # Find all children of current node
+            children_found = []
+            for parent, child in dag.edges:
+                if parent == current and child not in visited:
+                    children_found.append(child)
+                    if dag.nodes[child].node_type == "kernel":
+                        kernel_nodes.append(child)
+                        print(f"DEBUG: Found kernel: {child}")
+                    else:
+                        queue.append(child)
+                        print(f"DEBUG: Added to queue: {child}")
+
+            if not children_found:
+                print(f"DEBUG: No children found for {current}")
+
+        print(f"DEBUG: Total kernels found: {len(kernel_nodes)}")
+        return kernel_nodes
+
     def visualize_trace_dag(
         self, dag: TraceDAG, output_path: str = "trace_dag.png", format: str = "png"
     ) -> None:
@@ -842,6 +879,23 @@ class JsonProfile:
                 "Visualization libraries not available. Install matplotlib and graphviz."
             )
             return
+
+        # Calculate total kernel runtime for each operation node
+        op_kernel_runtimes = {}
+        for node_name, node in dag.nodes.items():
+            if node.node_type == "op":
+                connected_kernels = self._find_connected_kernels(dag, node_name)
+                total_runtime = 0.0
+                for kernel_name in connected_kernels:
+                    kernel_node = dag.nodes[kernel_name]
+                    kernel_runtime = sum(dur for dur, _ in kernel_node.kernel_instances)
+                    total_runtime += kernel_runtime
+                op_kernel_runtimes[node_name] = total_runtime
+                # Debug print to verify calculation
+                if total_runtime > 0:
+                    print(
+                        f"Op '{node_name}' has {len(connected_kernels)} connected kernels with total runtime: {total_runtime:.2f}μs"
+                    )
 
         # Use graphviz for clean DAG layout
         try:
@@ -894,7 +948,7 @@ class JsonProfile:
 
                     dot.node(safe_name, label, style="filled", fillcolor="lightcoral")
                 else:
-                    # Operation nodes with instance counts
+                    # Operation nodes with instance counts and total kernel runtime
                     instance_count = getattr(node, "instance_count", 0)
                     # Truncate long operation names for display
                     display_name = (
@@ -903,6 +957,12 @@ class JsonProfile:
                     label = f"{display_name}"
                     if instance_count > 0:
                         label += f"\\n{instance_count} instances"
+
+                    # Add total kernel runtime if this operation has connected kernels
+                    kernel_runtime = op_kernel_runtimes.get(node_name, 0.0)
+                    if kernel_runtime > 0.0:
+                        label += f"\\nKernel time: {kernel_runtime:.2f}μs"
+
                     dot.node(safe_name, label, style="filled", fillcolor="lightblue")
 
             # Add edges using safe names

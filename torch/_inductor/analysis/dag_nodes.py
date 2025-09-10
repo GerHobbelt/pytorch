@@ -24,19 +24,19 @@ class TraceDAGNode:
     def __init__(self, name: str, node_type: str):
         self.name = name
         self.node_type = node_type  # 'op' or 'kernel'
-        self.kernel_instances: List[
-            Tuple[float, int]
-        ] = []  # List of (duration_us, thread_id) for kernels
+        self.kernel_instances: List[Tuple[float, int]] = (
+            []
+        )  # List of (duration_us, thread_id) for kernels
         self.instance_count: int = (
             0  # Number of times this operation appears in the trace
         )
         # Performance statistics for kernels
-        self.achieved_flops_list: List[
-            float
-        ] = []  # List of achieved FLOPS % for each instance
-        self.achieved_bandwidth_list: List[
-            float
-        ] = []  # List of achieved bandwidth % for each instance
+        self.achieved_flops_list: List[float] = (
+            []
+        )  # List of achieved FLOPS % for each instance
+        self.achieved_bandwidth_list: List[float] = (
+            []
+        )  # List of achieved bandwidth % for each instance
 
         # Multi-trace support
         self.trace_data: Dict[int, Dict] = {}  # Maps trace_id to trace-specific data
@@ -154,8 +154,8 @@ class MultiTraceDAG:
             intensity = 0
 
         # Ensure minimum visibility by setting a floor
-        min_intensity = 0.2  # Minimum 20% of original color
-        max_intensity = 1.0  # 100% of original color
+        min_intensity = 0.01  # Minimum 1% of original color (colorless)
+        max_intensity = 1.2  # 120% of original color (slightly darker)
 
         # Scale intensity between min and max
         scaled_intensity = min_intensity + (max_intensity - min_intensity) * intensity

@@ -702,6 +702,32 @@ def create_multi_trace_visualization_parallel(
     return multi_dag
 
 
+def _find_connected_kernels_multi_trace(multi_dag: "MultiTraceDAG", op_node_name: str, trace_id: int) -> list[str]:
+    """
+    Find all kernel nodes that are reachable from the given operation node in a specific trace.
+    Uses BFS to traverse the DAG and collect all connected kernels.
+    """
+    visited = set()
+    kernel_nodes = []
+    queue = [op_node_name]
+    
+    while queue:
+        current = queue.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+        
+        # Find all children of current node for this specific trace
+        for parent, child, edge_trace_id in multi_dag.edges:
+            if parent == current and child not in visited and edge_trace_id == trace_id:
+                if multi_dag.nodes[child].node_type == "kernel":
+                    kernel_nodes.append(child)
+                else:
+                    queue.append(child)
+    
+    return kernel_nodes
+
+
 def visualize_multi_trace_dag(
     multi_dag: "MultiTraceDAG",
     output_path: str = "multi_trace_dag.png",
@@ -711,6 +737,20 @@ def visualize_multi_trace_dag(
     if not VISUALIZATION_AVAILABLE:
         print("Visualization libraries not available. Install matplotlib and graphviz.")
         return
+
+    # Calculate total kernel runtime for each operation node in each trace
+    op_kernel_runtimes = {}  # Maps (op_name, trace_id) -> total_runtime
+    for node_name, multi_node in multi_dag.nodes.items():
+        if multi_node.node_type == "op":
+            for trace_id in multi_node.present_in_traces:
+                connected_kernels = _find_connected_kernels_multi_trace(multi_dag, node_name, trace_id)
+                total_runtime = 0.0
+                for kernel_name in connected_kernels:
+                    if kernel_name in multi_dag.nodes and trace_id in multi_dag.nodes[kernel_name].trace_instances:
+                        kernel_node = multi_dag.nodes[kernel_name].trace_instances[trace_id]
+                        kernel_runtime = sum(dur for dur, _ in kernel_node.kernel_instances)
+                        total_runtime += kernel_runtime
+                op_kernel_runtimes[(node_name, trace_id)] = total_runtime
 
     try:
         import graphviz
@@ -727,8 +767,8 @@ def visualize_multi_trace_dag(
             safe_name = f"node_{i}"
             safe_names[node_name] = safe_name
 
-            # Create composite node label
-            label = _create_composite_node_label(multi_node, multi_dag)
+            # Create composite node label with kernel runtime information
+            label = _create_composite_node_label(multi_node, multi_dag, op_kernel_runtimes)
 
             # Style based on node type
             if multi_node.node_type == "kernel":
@@ -787,9 +827,12 @@ def visualize_multi_trace_dag(
 
 
 def _create_composite_node_label(
-    multi_node: "MultiTraceDAGNode", multi_dag: "MultiTraceDAG"
+    multi_node: "MultiTraceDAGNode", multi_dag: "MultiTraceDAG", op_kernel_runtimes: dict = None
 ) -> str:
     """Create a composite node label that shows data from each trace."""
+    if op_kernel_runtimes is None:
+        op_kernel_runtimes = {}
+        
     # For single trace, use simpler format
     if len(multi_node.present_in_traces) == 1:
         trace_id = next(iter(multi_node.present_in_traces))
@@ -814,7 +857,13 @@ def _create_composite_node_label(
             instance_count = getattr(node, "instance_count", 0)
             display_name_regular = _wrap_text(multi_node.name, 40)
             display_name_regular = _escape_html(display_name_regular)
-            return f"{display_name_regular}\\n{trace_name}: {instance_count} instances"
+            
+            # Add kernel runtime information if available
+            kernel_runtime = op_kernel_runtimes.get((multi_node.name, trace_id), 0.0)
+            if kernel_runtime > 0.0:
+                return f"{display_name_regular}\\n{trace_name}: {instance_count} instances\\nKernel time: {kernel_runtime:.2f}μs"
+            else:
+                return f"{display_name_regular}\\n{trace_name}: {instance_count} instances"
 
     # For multiple traces, create side-by-side layout using HTML table with vertical columns
     sorted_trace_ids = sorted(multi_node.present_in_traces)
@@ -851,9 +900,17 @@ def _create_composite_node_label(
             else:
                 bg_color = "#ffffff"
                 instance_count = getattr(node, "instance_count", 0)
-                data_cells.append(
-                    f'<TD BGCOLOR="{bg_color}">{trace_name}<BR/>{instance_count} instances</TD>'
-                )
+                
+                # Add kernel runtime information if available
+                kernel_runtime = op_kernel_runtimes.get((multi_node.name, trace_id), 0.0)
+                if kernel_runtime > 0.0:
+                    data_cells.append(
+                        f'<TD BGCOLOR="{bg_color}">{trace_name}<BR/>{instance_count} instances<BR/>Kernel time: {kernel_runtime:.2f}μs</TD>'
+                    )
+                else:
+                    data_cells.append(
+                        f'<TD BGCOLOR="{bg_color}">{trace_name}<BR/>{instance_count} instances</TD>'
+                    )
         else:
             # Empty cell for traces that don't have this node
             bg_color = "#ffffff"
