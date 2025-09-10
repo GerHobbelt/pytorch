@@ -27,6 +27,7 @@ class KernelStats:
     latency: float  # us
     achieved_flops: float
     achieved_bandwidth: float
+    bound_type: str = "unknown"  # "compute", "memory", or "unknown"
 
 
 @dataclass(frozen=False)

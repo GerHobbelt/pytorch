@@ -106,7 +106,25 @@ Specify as <input_file1> [input_file2 ...] <output_file> <dtype>. At least 3 arg
         action="store_true",
         help="Clear the DAG cache directory before processing",
     )
+    parser.add_argument(
+        "--color",
+        choices=["diff", "mem-utilization", "compute-utilization", "roofline"],
+        help="Coloring mode for kernel nodes: 'diff' colors by duration difference between profiles, 'mem-utilization' colors by memory bandwidth utilization %, 'compute-utilization' colors by compute utilization %, 'roofline' colors by roofline analysis (darker = lower utilization)",
+    )
+    parser.add_argument(
+        "--diff-baseline",
+        help="Path to baseline profile for diff coloring. Required when --color=diff is used.",
+    )
     args = parser.parse_args()
+
+    # Validate color/diff-baseline arguments
+    if args.color == "diff" and not args.diff_baseline:
+        print("Error: --diff-baseline is required when --color=diff is used")
+        return
+    if args.diff_baseline and args.color != "diff":
+        print(
+            "Warning: --diff-baseline specified but --color is not 'diff'. Ignoring --diff-baseline."
+        )
 
     # Handle cache clearing
     if args.clear_cache:
@@ -190,8 +208,17 @@ Specify as <input_file1> [input_file2 ...] <output_file> <dtype>. At least 3 arg
         if len(input_files) == 1:
             # Single trace visualization (backward compatibility)
             profile = JsonProfile(input_files[0], dtype=dtype)
+
+            # Handle baseline profile for diff coloring
+            baseline_profile = None
+            if args.color == "diff" and args.diff_baseline:
+                baseline_profile = JsonProfile(args.diff_baseline, dtype=dtype)
+
             dag = profile.create_trace_dag_visualization(
-                output_file, format=args.format
+                output_file,
+                format=args.format,
+                color_mode=args.color,
+                baseline_profile=baseline_profile,
             )
             print(f"DAG visualization completed and saved to {output_file}")
             print(

@@ -13,7 +13,7 @@ from concurrent.futures import as_completed, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-from torch._inductor.analysis.device_info import lookup_device_info
+from torch._inductor.analysis.device_info import lookup_device_info, compute_device_ridgepoint
 from torch._inductor.utils import tabulate_2d, zip_dicts
 from torch.utils._ordered_set import OrderedSet
 
@@ -181,9 +181,13 @@ class JsonProfile:
                     )
                 achieved_flops = 100 * op_flops / (1e12 * dev.info.tops[dtype])
                 achieved_bandwidth = 100 * op_gbps / dev.info.dram_bw_gbs
+                
+                # Calculate roofline bound type
+                bound_type = self._calculate_bound_type(dev.name, op_flops, op_gbps, dtype)
             else:
                 achieved_flops = 0
                 achieved_bandwidth = 0
+                bound_type = "unknown"
 
             if "name" not in event:
                 continue
@@ -195,8 +199,43 @@ class JsonProfile:
                     latency=dur,
                     achieved_bandwidth=achieved_bandwidth,
                     achieved_flops=achieved_flops,
+                    bound_type=bound_type,
                 )
             )
+
+    def _calculate_bound_type(self, device_name: str, op_flops: float, op_gbps: float, dtype: torch.dtype) -> str:
+        """
+        Calculate whether a kernel is compute-bound or memory-bound based on roofline analysis.
+        
+        Args:
+            device_name: Name of the device (e.g., "NVIDIA H100")
+            op_flops: Achieved FLOPS per second for this kernel instance
+            op_gbps: Achieved GB/s for this kernel instance  
+            dtype: Data type being used
+            
+        Returns:
+            "compute" if compute-bound, "memory" if memory-bound, "unknown" if calculation fails
+        """
+        # Calculate the device ridgepoint B = TOPS / BW
+        ridgepoint = compute_device_ridgepoint(device_name, dtype)
+        if ridgepoint is None:
+            return "unknown"
+            
+        # Convert op_flops to TOPS
+        op_tops = op_flops / 1e12
+        
+        # Calculate kernel's operational intensity: TOPS / GB/s
+        if op_gbps == 0:
+            # No memory traffic - pure compute
+            return "compute"
+            
+        kernel_intensity = op_tops / op_gbps
+        
+        # Compare to ridgepoint: if kernel intensity >= ridgepoint, it's compute-bound
+        if kernel_intensity >= ridgepoint:
+            return "compute"
+        else:
+            return "memory"
 
     def _compute_stats_parallel(self) -> None:
         """Parallel version of _compute_stats."""
@@ -759,6 +798,9 @@ class JsonProfile:
                                 kernel_node.achieved_bandwidth_list.append(
                                     best_stats.achieved_bandwidth
                                 )
+                                kernel_node.bound_type_list.append(
+                                    best_stats.bound_type
+                                )
 
         # Store operation instance counts in the DAG nodes
         for op_name, count in op_instance_counts.items():
@@ -869,7 +911,7 @@ class JsonProfile:
         return kernel_nodes
 
     def visualize_trace_dag(
-        self, dag: TraceDAG, output_path: str = "trace_dag.png", format: str = "png"
+        self, dag: TraceDAG, output_path: str = "trace_dag.png", format: str = "png", color_mode: Optional[str] = None, baseline_profile: Optional["JsonProfile"] = None
     ) -> None:
         """
         Create a PNG visualization of the trace DAG with operations at top and kernels at bottom.
@@ -896,6 +938,11 @@ class JsonProfile:
                     print(
                         f"Op '{node_name}' has {len(connected_kernels)} connected kernels with total runtime: {total_runtime:.2f}μs"
                     )
+
+        # Calculate coloring for kernel nodes based on color_mode
+        kernel_colors = {}
+        if color_mode and color_mode in ["diff", "mem-utilization", "compute-utilization", "roofline"]:
+            kernel_colors = self._calculate_kernel_colors(dag, color_mode, baseline_profile)
 
         # Use graphviz for clean DAG layout
         try:
@@ -946,7 +993,27 @@ class JsonProfile:
                         if bw_max > 0.0:
                             label += f"\\nBW %: min={bw_min:.1f}, max={bw_max:.1f}, avg={bw_avg:.1f}"
 
-                    dot.node(safe_name, label, style="filled", fillcolor="lightcoral")
+                    # Add bound type information if available
+                    if node.bound_type_list:
+                        # Count compute vs memory bound instances
+                        compute_count = node.bound_type_list.count("compute")
+                        memory_count = node.bound_type_list.count("memory")
+                        total_bound = compute_count + memory_count
+                        
+                        if total_bound > 0:
+                            if compute_count > memory_count:
+                                label += f"\\nCompute Bound ({compute_count}/{total_bound})"
+                            elif memory_count > compute_count:
+                                label += f"\\nMemory Bound ({memory_count}/{total_bound})"
+                            else:
+                                label += f"\\nMixed Bound (C:{compute_count}, M:{memory_count})"
+                        else:
+                            # All instances are unknown bound type
+                            label += f"\\nBound: Unknown"
+
+                    # Use color from coloring algorithm or default
+                    color = kernel_colors.get(node_name, "lightcoral")
+                    dot.node(safe_name, label, style="filled", fillcolor=color)
                 else:
                     # Operation nodes with instance counts and total kernel runtime
                     instance_count = getattr(node, "instance_count", 0)
@@ -970,6 +1037,13 @@ class JsonProfile:
                 if parent in safe_names and child in safe_names:
                     dot.edge(safe_names[parent], safe_names[child])
 
+            # Add color legend based on color mode
+            if color_mode:
+                legend_text = self._get_color_legend_text(color_mode)
+                if legend_text:
+                    # Add legend as a separate node
+                    dot.node("legend", legend_text, shape="note", style="filled", fillcolor="white")
+
             # Render to specified format
             base_path = output_path.replace(".png", "").replace(".svg", "")
             dot.render(base_path, format=format, cleanup=True)
@@ -979,6 +1053,209 @@ class JsonProfile:
             print(f"Graphviz visualization failed: {e}")
             # Fallback to matplotlib
             self._visualize_dag_matplotlib(dag, output_path)
+
+    def _calculate_kernel_colors(self, dag: TraceDAG, color_mode: str, baseline_profile: Optional["JsonProfile"] = None) -> Dict[str, str]:
+        """
+        Calculate colors for kernel nodes based on the specified color mode.
+        Returns a dictionary mapping kernel names to color strings.
+        """
+        if color_mode not in ["diff", "mem-utilization", "compute-utilization", "roofline"]:
+            return {}
+            
+        kernel_colors = {}
+        kernel_nodes = {name: node for name, node in dag.nodes.items() if node.node_type == "kernel"}
+        
+        if not kernel_nodes:
+            return {}
+            
+        if color_mode == "diff":
+            if baseline_profile is None:
+                print("Warning: diff coloring requested but no baseline profile provided")
+                return {}
+                
+            # Build baseline DAG to get kernel durations
+            baseline_dag = baseline_profile.build_trace_dag()
+            baseline_durations = {}
+            
+            for name, node in baseline_dag.nodes.items():
+                if node.node_type == "kernel":
+                    total_duration = sum(dur for dur, _ in node.kernel_instances)
+                    baseline_durations[name] = total_duration
+            
+            # Calculate duration differences
+            current_durations = {}
+            duration_diffs = {}
+            
+            for name, node in kernel_nodes.items():
+                current_duration = sum(dur for dur, _ in node.kernel_instances)
+                current_durations[name] = current_duration
+                
+                baseline_duration = baseline_durations.get(name, 0.0)
+                if baseline_duration == 0.0:
+                    # Kernel not present in baseline - give maximum color value
+                    duration_diffs[name] = float('inf')
+                else:
+                    diff = current_duration - baseline_duration
+                    duration_diffs[name] = diff
+            
+            # Normalize differences for coloring
+            finite_diffs = [d for d in duration_diffs.values() if d != float('inf')]
+            if finite_diffs:
+                min_diff = min(finite_diffs)
+                max_diff = max(finite_diffs)
+                
+                for name, diff in duration_diffs.items():
+                    if diff == float('inf'):
+                        # Highest color for kernels not in baseline
+                        color_intensity = 1.0
+                    elif max_diff == min_diff:
+                        color_intensity = 0.0
+                    else:
+                        # Normalize to [0, 1] range
+                        color_intensity = (diff - min_diff) / (max_diff - min_diff)
+                    
+                    # Convert to color (red gradient for positive diff, blue for negative)
+                    if diff > 0:
+                        # Red gradient (worse performance)
+                        color_val = int(255 * (1 - color_intensity * 0.6))  # Range from 255 to 102
+                        kernel_colors[name] = f"#{255:02x}{color_val:02x}{color_val:02x}"
+                    elif diff < 0:
+                        # Blue gradient (better performance)
+                        color_val = int(255 * (1 - color_intensity * 0.6))  # Range from 255 to 102
+                        kernel_colors[name] = f"#{color_val:02x}{color_val:02x}{255:02x}"
+                    else:
+                        # No difference - neutral color
+                        kernel_colors[name] = "#ffffff"
+                        
+        elif color_mode == "mem-utilization":
+            # Color by memory bandwidth utilization
+            utilizations = {}
+            
+            for name, node in kernel_nodes.items():
+                if node.achieved_bandwidth_list:
+                    avg_utilization = sum(node.achieved_bandwidth_list) / len(node.achieved_bandwidth_list)
+                    utilizations[name] = avg_utilization
+                else:
+                    utilizations[name] = 0.0
+            
+            if utilizations:
+                max_util = max(utilizations.values())
+                min_util = min(utilizations.values())
+                
+                for name, util in utilizations.items():
+                    if max_util == min_util:
+                        color_intensity = 0.0
+                    else:
+                        color_intensity = (util - min_util) / (max_util - min_util)
+                    
+                    # Green gradient (higher utilization = more green)
+                    color_val = int(255 * (1 - color_intensity * 0.7))  # Range from 255 to 77
+                    kernel_colors[name] = f"#{color_val:02x}{255:02x}{color_val:02x}"
+                    
+        elif color_mode == "compute-utilization":
+            # Color by compute (FLOPS) utilization
+            utilizations = {}
+            
+            for name, node in kernel_nodes.items():
+                if node.achieved_flops_list:
+                    avg_utilization = sum(node.achieved_flops_list) / len(node.achieved_flops_list)
+                    utilizations[name] = avg_utilization
+                else:
+                    utilizations[name] = 0.0
+            
+            if utilizations:
+                max_util = max(utilizations.values())
+                min_util = min(utilizations.values())
+                
+                for name, util in utilizations.items():
+                    if max_util == min_util:
+                        color_intensity = 0.0
+                    else:
+                        color_intensity = (util - min_util) / (max_util - min_util)
+                    
+                    # Purple gradient (higher utilization = more purple)
+                    color_val = int(255 * (1 - color_intensity * 0.7))  # Range from 255 to 77
+                    kernel_colors[name] = f"#{255:02x}{color_val:02x}{255:02x}"
+                    
+        elif color_mode == "roofline":
+            # Color by roofline analysis: use % memory utilization if memory-bound, % compute utilization if compute-bound
+            # Gradient is inverted: low utilization = darker color (worse)
+            roofline_scores = {}
+            
+            for name, node in kernel_nodes.items():
+                if not (node.bound_type_list and node.achieved_flops_list and node.achieved_bandwidth_list):
+                    roofline_scores[name] = 0.0
+                    continue
+                    
+                # Calculate the average bound type and utilization
+                bound_types = node.bound_type_list
+                flops_utils = node.achieved_flops_list
+                bw_utils = node.achieved_bandwidth_list
+                
+                total_score = 0.0
+                valid_instances = 0
+                
+                for i in range(min(len(bound_types), len(flops_utils), len(bw_utils))):
+                    bound_type = bound_types[i]
+                    if bound_type == "compute":
+                        # Use compute utilization for compute-bound kernels
+                        total_score += flops_utils[i]
+                        valid_instances += 1
+                    elif bound_type == "memory":
+                        # Use memory utilization for memory-bound kernels
+                        total_score += bw_utils[i]
+                        valid_instances += 1
+                    # Skip "unknown" bound types
+                
+                # Average utilization score
+                if valid_instances > 0:
+                    roofline_scores[name] = total_score / valid_instances
+                else:
+                    roofline_scores[name] = 0.0
+            
+            if roofline_scores:
+                max_score = max(roofline_scores.values())
+                min_score = min(roofline_scores.values())
+                
+                for name, score in roofline_scores.items():
+                    if max_score == min_score:
+                        # All kernels have same utilization
+                        color_intensity = 0.5
+                    else:
+                        # Normalize to [0, 1] range
+                        color_intensity = (score - min_score) / (max_score - min_score)
+                    
+                    # Invert the gradient: low utilization = darker (worse), high utilization = lighter (better)
+                    # Use a gradient from dark red (poor) to light yellow (good)
+                    inverted_intensity = 1.0 - color_intensity
+                    
+                    # Dark red to light yellow gradient
+                    if inverted_intensity > 0.5:
+                        # More red (worse performance)
+                        red_val = 255
+                        green_val = int(255 * (1 - inverted_intensity) * 2)  # 0 to 255
+                        blue_val = 0
+                    else:
+                        # More yellow (better performance)
+                        red_val = 255
+                        green_val = 255
+                        blue_val = int(255 * inverted_intensity * 2)  # 255 to 0
+                    
+                    kernel_colors[name] = f"#{red_val:02x}{green_val:02x}{blue_val:02x}"
+        
+        return kernel_colors
+
+    def _get_color_legend_text(self, color_mode: str) -> Optional[str]:
+        """Get legend text for the specified color mode."""
+        if color_mode == "diff":
+            return "Legend\\nRed: Slower than baseline\\nBlue: Faster than baseline\\nWhite: Same as baseline"
+        elif color_mode == "mem-utilization":
+            return "Legend\\nGreen: Memory bandwidth utilization\\nDarker = lower utilization"
+        elif color_mode == "compute-utilization":
+            return "Legend\\nPurple: Compute utilization\\nDarker = lower utilization"
+        elif color_mode == "roofline":
+            return "Legend\\nRoofline Analysis\\nDark Red: Low utilization (worse)\\nLight Yellow: High utilization (better)\\nCompute-bound: Uses compute %\\nMemory-bound: Uses memory %"
+        return None
 
     def _visualize_dag_matplotlib(self, dag: TraceDAG, output_path: str) -> None:
         """Fallback visualization using matplotlib."""
@@ -1063,7 +1340,7 @@ class JsonProfile:
         return False
 
     def create_trace_dag_visualization(
-        self, output_path: str = "trace_dag.png", format: str = "png"
+        self, output_path: str = "trace_dag.png", format: str = "png", color_mode: Optional[str] = None, baseline_profile: Optional["JsonProfile"] = None
     ) -> TraceDAG:
         """
         Convenience method to build and visualize the trace DAG in one step.
@@ -1112,7 +1389,7 @@ shape and type information needed for calculations. To include performance metri
             )
 
         print(f"Visualizing DAG to {output_path}...")
-        self.visualize_trace_dag(dag, output_path, format)
+        self.visualize_trace_dag(dag, output_path, format, color_mode, baseline_profile)
 
         return dag
 

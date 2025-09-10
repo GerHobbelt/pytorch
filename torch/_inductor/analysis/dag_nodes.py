@@ -38,6 +38,11 @@ class TraceDAGNode:
             []
         )  # List of achieved bandwidth % for each instance
 
+        # Roofline analysis
+        self.bound_type_list: List[str] = (
+            []
+        )  # List of "compute" or "memory" for each instance based on roofline analysis
+
         # Multi-trace support
         self.trace_data: Dict[int, Dict] = {}  # Maps trace_id to trace-specific data
 
