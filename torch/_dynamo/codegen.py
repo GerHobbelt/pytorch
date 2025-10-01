@@ -26,7 +26,9 @@ from . import config, graph_break_hints, utils
 from .bytecode_transformation import (
     add_push_null,
     add_push_null_call_function_ex,
+    create_binary_subscr,
     create_call_function,
+    create_call_function_ex,
     create_call_method,
     create_dup_top,
     create_instruction,
@@ -397,7 +399,7 @@ class PyCodegen:
             self(i)
 
     def create_binary_subscr(self) -> Instruction:
-        return create_instruction("BINARY_SUBSCR")
+        return create_binary_subscr()
 
     def setup_globally_cached(self, name: str, value: Any) -> list[Instruction]:
         """Store value in a new global"""
@@ -516,7 +518,7 @@ class PyCodegen:
                 create_instruction("BUILD_TUPLE", arg=n),
                 self.create_load_const_unchecked(rot_n_helper(n)),
                 *create_rot_n(2),
-                create_instruction("CALL_FUNCTION_EX", arg=0),
+                *create_call_function_ex(False),
                 create_instruction("UNPACK_SEQUENCE", arg=n),
             ]
 
