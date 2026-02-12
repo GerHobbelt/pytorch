@@ -34,6 +34,7 @@ import torch
 import torch._inductor.async_compile  # noqa: F401 required to warm up AsyncCompile pools
 import torch.utils._pytree as pytree
 from torch._dynamo.utils import counters, dynamo_timed
+from torch._inductor.autotune_process import use_pipelined_autotuning
 from torch._inductor.codecache import LambdaFuture, PyCodeCache
 from torch._inductor.ir import TritonTemplateCallerBase
 from torch._inductor.metrics import get_metric_table, is_metric_table_enabled
@@ -2970,7 +2971,7 @@ class Scheduler:
         self.finalize_multi_template_buffers()
         if (
             config.max_autotune_gemm or config.max_autotune
-        ) and config.pipeline_max_autotune_gemm:
+        ) and use_pipelined_autotuning():
             torch._inductor.select_algorithm.PrecompileThreadPool.shutdown_instance()
 
         if config.combo_kernels:
@@ -4041,7 +4042,7 @@ class Scheduler:
             )
             # Track if the choice timings can be retrieved async after compilation
             get_choice_timings_async = (
-                config.pipeline_max_autotune_gemm
+                use_pipelined_autotuning()
                 and not bench_epilogue
                 and num_triton_callers <= config.max_epilogue_benchmarked_choices
             )
