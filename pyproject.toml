@@ -160,8 +160,6 @@ ignore = [
     "EXE001",
     "F405",
     "FURB122", # writelines
-    # these ignores are from flake8-logging-format; please fix!
-    "G101",
     # these ignores are from ruff NPY; please fix!
     "NPY002",
     # these ignores are from ruff PERF; please fix!
@@ -242,6 +240,7 @@ select = [
     "Q003",  # avoidable escaped quote
     "Q004",  # unnecessary escaped quote
     "RSE",
+    "RUF007", # pairwise over zip
     "RUF008", # mutable dataclass default
     "RUF013", # ban implicit optional
     "RUF015", # access first ele in constant time
