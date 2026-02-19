@@ -211,6 +211,14 @@ def at_least_x_gpu(x):
     return False
 
 
+def _maybe_handle_skip_if_lt_x_gpu(args, msg) -> bool:
+    _handle_test_skip = getattr(args[0], "_handle_test_skip", None)
+    if len(args) == 0 or _handle_test_skip is None:
+        return False
+    _handle_test_skip(msg)
+    return True
+
+
 def skip_if_lt_x_gpu(x):
     def decorator(func):
         @wraps(func)
@@ -221,52 +229,13 @@ def skip_if_lt_x_gpu(x):
                 return func(*args, **kwargs)
             if TEST_XPU and torch.xpu.device_count() >= x:
                 return func(*args, **kwargs)
-            sys.exit(TEST_SKIPS[f"multi-gpu-{x}"].exit_code)
+            test_skip = TEST_SKIPS[f"multi-gpu-{x}"]
+            if _maybe_handle_skip_if_lt_x_gpu(args, test_skip.message):
+                sys.exit(test_skip.exit_code)
 
         return wrapper
 
     return decorator
-
-
-def requires_world_size(n: int):
-    """
-    Decorator to request a specific world size for a test. The test harness can
-    read this attribute to set the number of ranks to spawn. If there are fewer
-    than `n` CUDA devices available, the test should be skipped by the harness.
-
-    Usage:
-        @require_world_size(3)
-        def test_something(self):
-            ...
-    """
-
-    def decorator(func):
-        func._required_world_size = n
-        available = torch.cuda.device_count()
-        return unittest.skipUnless(
-            available >= n, f"requires {n} GPUs, found {available}"
-        )(func)
-
-    return decorator
-
-
-def get_required_world_size(obj: Any, default: int) -> int:
-    """
-    Returns the requested world size for the currently running unittest method on `obj`
-    if annotated via `@require_world_size(n)`, else returns `default`.
-    """
-    try:
-        # Try MultiProcessTestCase helper first, then unittest fallback
-        test_name = (
-            obj._current_test_name()  # type: ignore[attr-defined]
-            if hasattr(obj, "_current_test_name") and callable(obj._current_test_name)
-            else obj._testMethodName
-        )
-        fn = getattr(obj, test_name)
-        value = fn._required_world_size
-        return int(value)
-    except Exception:
-        return default
 
 
 # This decorator helps avoiding initializing cuda while testing other backends
@@ -278,7 +247,9 @@ def nccl_skip_if_lt_x_gpu(backend, x):
                 return func(*args, **kwargs)
             if torch.cuda.is_available() and torch.cuda.device_count() >= x:
                 return func(*args, **kwargs)
-            sys.exit(TEST_SKIPS[f"multi-gpu-{x}"].exit_code)
+            test_skip = TEST_SKIPS[f"multi-gpu-{x}"]
+            if _maybe_handle_skip_if_lt_x_gpu(args, test_skip.message):
+                sys.exit(test_skip.exit_code)
 
         return wrapper
 
@@ -394,13 +365,6 @@ def requires_nccl_version(version, msg):
             torch.cuda.nccl.version() < version,
             f"Requires NCCL version greater than or equal to: {version}, found: {torch.cuda.nccl.version()}, reason: {msg}",
         )
-
-
-def requires_nccl_shrink():
-    """
-    Require NCCL shrink support (NCCL available and version >= 2.27).
-    """
-    return requires_nccl_version((2, 27), "Need NCCL 2.27+ for shrink_group")
 
 
 def requires_nccl():
@@ -1189,7 +1153,7 @@ def run_subtests(
     subtest_config_values: list[list[Any]] = [item[1] for item in subtest_config_items]
     for values in itertools.product(*subtest_config_values):
         # Map keyword to chosen value
-        subtest_kwargs = dict(zip(subtest_config_keys, values))
+        subtest_kwargs = dict(zip(subtest_config_keys, values, strict=True))
         with cls_inst.subTest(**subtest_kwargs):
             torch._dynamo.reset()
             test_fn(*test_args, **test_kwargs, **subtest_kwargs)
