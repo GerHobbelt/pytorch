@@ -210,7 +210,11 @@ def bind_args_cached(
             raise_observed_exception(
                 TypeError,
                 tx,
-                args=[f"Missing required positional argument: {name}"],
+                args=[
+                    ConstantVariable.create(
+                        f"Missing required positional argument: {name}"
+                    )
+                ],
             )
 
     # 2) *args
@@ -222,7 +226,9 @@ def bind_args_cached(
             TypeError,
             tx,
             args=[
-                f"Too many positional arguments: got {len(args)}, expected {len(spec.all_pos_names)}"
+                ConstantVariable.create(
+                    f"Too many positional arguments: got {len(args)}, expected {len(spec.all_pos_names)}"
+                )
             ],
         )
 
@@ -239,7 +245,11 @@ def bind_args_cached(
             raise_observed_exception(
                 TypeError,
                 tx,
-                args=[f"Missing required keyword-only argument: {name}"],
+                args=[
+                    ConstantVariable.create(
+                        f"Missing required keyword-only argument: {name}"
+                    )
+                ],
             )
 
     # 4) **kwargs
@@ -249,7 +259,9 @@ def bind_args_cached(
         raise_observed_exception(
             TypeError,
             tx,
-            args=[f"Unexpected keyword arguments: {list(rem_kw)}"],
+            args=[
+                ConstantVariable.create(f"Unexpected keyword arguments: {list(rem_kw)}")
+            ],
         )
 
     return ba
@@ -642,8 +654,9 @@ class UserFunctionVariable(BaseUserFunctionVariable):
                 return super().call_function(tx, args, kwargs)
 
         if (
-            tx.output.current_tracer.under_activation_checkpoint
-            and not tx.output.current_tracer.allow_side_effects_under_checkpoint
+            getattr(tx.output.current_tracer, "description", None)
+            == "torch.utils.checkpoint.checkpoint"
+            and not tx.output.current_tracer.allow_side_effects_in_hop
         ):
             try:
                 from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState
@@ -653,7 +666,7 @@ class UserFunctionVariable(BaseUserFunctionVariable):
                 FSDPState._pre_forward,
                 FSDPState._post_forward,
             ]:
-                with torch._dynamo.side_effects.allow_side_effects_under_checkpoint(tx):
+                with torch._dynamo.side_effects.allow_side_effects_in_hop(tx):
                     return super().call_function(tx, args, kwargs)
 
         tree_map_result = self._maybe_call_tree_map_fastpath(tx, args, kwargs)
@@ -2982,7 +2995,7 @@ class PyTreeGetNodeTypeFunctionVariable(UserFunctionVariable):
         if len(args) != 1:
             raise_type_error_exc(
                 tx,
-                f"_get_node_type() takes 1 positional argument but {len(args)} were given",
+                f"pytree_get_node_type requires exactly 1 argument, got {len(args)}",
             )
         type_source = None
         if args[0].source:
