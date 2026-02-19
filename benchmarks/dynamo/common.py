@@ -2289,11 +2289,9 @@ class BenchmarkRunner:
                     )
                 ):
                     is_same = False
-            except Exception as e:
+            except Exception:
                 # Sometimes torch.allclose may throw RuntimeError
-                exception_string = str(e)
-                accuracy_status = f"fail_exception: {exception_string}"
-                return record_status(accuracy_status, dynamo_start_stats=start_stats)
+                is_same = False
 
             if not is_same:
                 accuracy_status = "eager_two_runs_differ"
@@ -2410,11 +2408,9 @@ class BenchmarkRunner:
                     force_max_multiplier=force_max_multiplier,
                 ):
                     is_same = False
-            except Exception as e:
+            except Exception:
                 # Sometimes torch.allclose may throw RuntimeError
-                exception_string = str(e)
-                accuracy_status = f"fail_exception: {exception_string}"
-                return record_status(accuracy_status, dynamo_start_stats=start_stats)
+                is_same = False
 
             if not is_same:
                 if self.args.skip_accuracy_check:
