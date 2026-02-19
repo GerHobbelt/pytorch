@@ -1,6 +1,7 @@
 import os
 import sys
-from typing import Any, Callable, Literal, Optional, TYPE_CHECKING, Union
+from collections.abc import Callable
+from typing import Any, Literal, Optional, TYPE_CHECKING, Union
 
 import torch
 import torch._inductor.custom_graph_pass
@@ -549,10 +550,6 @@ max_autotune_flex_search_space: Literal["DEFAULT", "EXHAUSTIVE"] = os.environ.ge
     "TORCHINDUCTOR_MAX_AUTOTUNE_FLEX_SEARCH_SPACE", "DEFAULT"
 ).upper()  # type: ignore[assignment]
 
-cutedsl_enable_autotuning: bool = (
-    os.environ.get("CUTEDSL_ENABLE_AUTOTUNING", "0") == "1"
-)
-
 # DEPRECATED. This setting is ignored.
 autotune_fallback_to_aten = False
 
@@ -916,6 +913,11 @@ class aten_distributed_optimizations:
     custom_runtime_estimation: Optional[Callable[[torch.fx.Node], Optional[float]]] = (
         None
     )
+
+    # Method for estimating collective runtime
+    # "analytical": Use bandwidth formulas (default)
+    # "benchmark": Use CUDA events with power-of-2 rounding and interpolation
+    collective_estimator: Literal["analytical", "benchmark"] = "analytical"
 
 
 def parallel_compile_enabled_internally() -> bool:
