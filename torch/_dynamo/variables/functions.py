@@ -2268,7 +2268,7 @@ class SkipFunctionVariable(VariableTracker):
                 )
                 # pyrefly: ignore [implicit-any]
                 hints = []
-            reason = self.reason if self.reason else "<missing reason>"
+            reason = self.reason or "<missing reason>"
             unimplemented(
                 gb_type="Attempted to call function marked as skipped",
                 context=f"module: {module_name}, qualname: {qualname}, skip reason: {reason}",
@@ -2772,12 +2772,17 @@ class PolyfilledFunctionVariable(VariableTracker):
         if self.can_constant_fold_through() and check_unspec_or_constant_args(
             args, kwargs
         ):
-            result = (
-                self.fn(  # use the original function which is faster than the polyfill
+            try:
+                result = self.fn(  # use the original function which is faster than the polyfill
                     *[x.as_python_constant() for x in args],
                     **{k: v.as_python_constant() for k, v in kwargs.items()},
                 )
-            )
+            except (TypeError, ValueError) as exc:
+                raise_observed_exception(
+                    type(exc),
+                    tx,
+                    args=[VariableTracker.build(tx, a) for a in exc.args],
+                )
             return VariableTracker.build(tx, result)
 
         # Special case for sum on tuple/list of ints
