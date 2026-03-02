@@ -937,7 +937,10 @@ class CachingAutotuner(KernelInterface):
         if launcher is None:
             return
 
-        expected_arg_names = getattr(launcher, 'def_arg_names', None)
+        if getattr(launcher, "_inductor_args_validated", False):
+            return
+
+        expected_arg_names = getattr(launcher, "def_arg_names", None)
         if expected_arg_names is not None:
             # Launcher exposes explicit argument names (excluding stream).
             expected_count = len(expected_arg_names)
@@ -950,6 +953,16 @@ class CachingAutotuner(KernelInterface):
                     f"arguments ({arg_names_str}) but got {positional_count}. "
                     f"Please check the number and order of positional arguments passed to the kernel."
                 )
+            # Check for overlapping arguments (kwargs that map to already filled positional slots)
+            filled_positional_names = expected_arg_names[:positional_count]
+            overlapping = [name for name in kwargs if name in filled_positional_names]
+            if overlapping:
+                overlap_str = ", ".join(overlapping)
+                raise TypeError(
+                    f"Kernel '{self.fn.__name__}' got multiple values for argument(s) '{overlap_str}'. "
+                    f"This usually means you passed too many positional arguments that overlapped with keyword arguments."
+                )
+
             # First `positional_count` expected args are satisfied by positional arguments.
             remaining_expected = expected_arg_names[positional_count:]
             matched_kwargs = [name for name in remaining_expected if name in kwargs]
@@ -971,7 +984,16 @@ class CachingAutotuner(KernelInterface):
             expected_params = getattr(launcher, "__code__", None)
             if expected_params is None:
                 return
-            expected_count = expected_params.co_argcount - 1  # Excluding stream
+
+            co_flags = getattr(expected_params, "co_flags", 0)
+            if co_flags & 0x04:  # CO_VARARGS (*args)
+                return
+
+            co_argcount = getattr(expected_params, "co_argcount", None)
+            if co_argcount is None:
+                return
+
+            expected_count = max(0, co_argcount - 1)  # Excluding stream
             positional_count = len(args)
             if positional_count > expected_count:
                 raise TypeError(
@@ -980,8 +1002,13 @@ class CachingAutotuner(KernelInterface):
                     f"Please check the number and order of positional arguments passed to the kernel."
                 )
 
+        try:
+            launcher._inductor_args_validated = True
+        except Exception:
+            pass
+
     def bench(self, launcher, *args, with_profiler=False, **kwargs):
-        """Measure the performance of a given launcher"""
+        """Measure the performance of a given launcher."""
         # we don't skip configs with spilled registers when auto-tuning custom
         # (user-written) Triton kernels, as (i) we don't have any knowledge or
         # control over the kernel code; (ii) there is empirical evidence that
@@ -1020,7 +1047,9 @@ class CachingAutotuner(KernelInterface):
                     profiler_kwargs,
                 ):
                     try:
-                        self._validate_launcher_args(launcher, cloned_args, cloned_kwargs)
+                        self._validate_launcher_args(
+                            launcher, cloned_args, cloned_kwargs
+                        )
                         launcher(
                             *cloned_args,
                             **cloned_kwargs,
