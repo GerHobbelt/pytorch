@@ -388,12 +388,17 @@ def _pallas_tile_size(
     return max(alignment, t)
 
 
+
+
+
 def pallas_compute_tiling(
     ref_shape: tuple[int, ...],
-    transpose: bool = False,
+    transpose: bool = False,  # constrain tile size for permutation VMEM padding
     skip_last_n: int = 0,
     exact_only: bool = False,
     is_tpu: bool = False,
+    permutations: "Optional[list[tuple[int, ...]]]" = None,
+    max_grid_product: "Optional[int]" = None,
 ) -> tuple[tuple[int, ...], tuple[int, ...], dict[int, int]]:
     """Compute tile shape, grid and axis→grid-dim mapping for CPU/TPU.
 
@@ -401,9 +406,8 @@ def pallas_compute_tiling(
     second-to-last multiple of 8) so that the same generated kernel works
     on both CPU-interpret and real TPU.
 
-    When *transpose* is True and nd >= 2, both last-2 dims use the same
-    square tile size based on the smaller alignment so that transposed
-    buffers can use the same tile for both dims.
+    *transpose* constrains tile sizes to keep VMEM usage within safe
+    limits when Mosaic pads permuted tile dimensions.
 
     *skip_last_n* prevents tiling the last N dimensions (used when those
     dims correspond to internal reduction ranges that must remain full).
@@ -434,8 +438,23 @@ def pallas_compute_tiling(
     # tensor, not its position in the tileable subset.  The TPU requires
     # the physical last dim to be a multiple of 128 and the physical
     # second-to-last dim to be a multiple of 8.
+    #
+    # When permutations are present, an output dim `ax` maps to input
+    # dim `perm[ax]`.  If `perm[ax]` is the input's last dim, that
+    # output dim must also satisfy _TPU_ALIGN_LAST.  Compute the
+    # strictest alignment across all buffers.
+    def _input_align(input_ax: int, input_nd: int) -> int:
+        return _TPU_ALIGN_LAST if input_ax == input_nd - 1 else _TPU_ALIGN_SECOND_LAST
+
     def _align(ax: int) -> int:
-        return _TPU_ALIGN_LAST if ax == nd - 1 else _TPU_ALIGN_SECOND_LAST
+        out_align = _TPU_ALIGN_LAST if ax == nd - 1 else _TPU_ALIGN_SECOND_LAST
+        if permutations:
+            for perm in permutations:
+                if perm is not None and len(perm) == nd:
+                    in_ax = perm[ax]
+                    in_align = _input_align(in_ax, len(perm))
+                    out_align = max(out_align, in_align)
+        return out_align
 
     def _can_tile_ax(ax: int, dim: int, t: int) -> bool:
         """Check if tiling dim to t is valid."""
@@ -497,7 +516,140 @@ def pallas_compute_tiling(
                 axis_to_grid[ax] = len(grid_parts)
                 grid_parts.append((ref_shape[ax] + t - 1) // t)
 
+    # For permutation kernels, undo TPU alignment padding on axes where
+    # tile > dim.  TPU OOB masking handles the padding at the hardware
+    # level, but inflated tiles waste VMEM when permutations shuffle
+    # small dims into positions that get padded by Mosaic.
+    if transpose:
+        for ax in range(tileable_nd):
+            if tile[ax] > ref_shape[ax]:
+                tile[ax] = ref_shape[ax]
+                if ax in axis_to_grid:
+                    gi = axis_to_grid[ax]
+                    grid_parts[gi] = (ref_shape[ax] + tile[ax] - 1) // tile[ax]
+
+    max_tile_elems: int | None = None
+    # For permutation kernels, Mosaic pads the output tile's last dim
+    # to _TPU_ALIGN_LAST (128).  When a small dim ends up last after
+    # permutation, VMEM usage = tile_bytes * pad_factor * 3 (in + out +
+    # alias) must fit in the scoped VMEM limit (vmem_capacity / 2).
+    # Query VMEM capacity; fall back to 64MB (TPU v4/v5 default).
+    if transpose:
+        try:
+            from jax.experimental.pallas import tpu as pltpu
+            vmem_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
+        except Exception:
+            vmem_bytes = 64 * 1024 * 1024
+        scoped_limit = vmem_bytes // 2
+
+        # Mosaic pads the last dim to _TPU_ALIGN_LAST (128) and the
+        # second-to-last to _TPU_ALIGN_SECOND_LAST (8).  Compute the
+        # worst-case pad factor across all buffers (input permutations
+        # may place small dims in these positions).
+        def _pad_factor_for_shape(shape):
+            if len(shape) < 2:
+                return max(1, _TPU_ALIGN_LAST // max(shape[-1], 1)) if shape else 1
+            last = max(shape[-1], 1)
+            second = max(shape[-2], 1)
+            return (max(1, _TPU_ALIGN_LAST // last) *
+                    max(1, _TPU_ALIGN_SECOND_LAST // second))
+
+        pad_factor = _pad_factor_for_shape(tile)
+        if permutations:
+            for perm in permutations:
+                if perm is not None and len(perm) == nd:
+                    permuted_tile = tuple(tile[p] for p in perm)
+                    pad_factor = max(pad_factor, _pad_factor_for_shape(permuted_tile))
+
+        tile_elems = 1
+        for t in tile:
+            tile_elems *= t
+        max_tile_elems = scoped_limit // (4 * 3 * pad_factor)  # f32, in + out + alias
+        max_tile_elems = max(max_tile_elems, 1024)
+
+        if tile_elems > max_tile_elems:
+            # Shrink tileable dims to fit VMEM budget
+            tileable_axes = [
+                ax for ax in range(tileable_nd - 1, -1, -1)
+                if ref_shape[ax] > 1
+            ]
+            for ax in tileable_axes:
+                if tile_elems <= max_tile_elems:
+                    break
+                dim = ref_shape[ax]
+                cur_t = tile[ax]
+                align = _align(ax)
+                target = max(align, (cur_t * max_tile_elems // tile_elems // align) * align)
+                best_t = cur_t
+                for candidate in range(target, 0, -align):
+                    if candidate >= cur_t:
+                        continue
+                    if dim % candidate != 0:
+                        continue
+                    best_t = candidate
+                    break
+                if best_t < cur_t:
+                    if ax in axis_to_grid:
+                        grid_parts[axis_to_grid[ax]] = dim // best_t
+                    else:
+                        axis_to_grid[ax] = len(grid_parts)
+                        grid_parts.append(dim // best_t)
+                    tile_elems = tile_elems * best_t // cur_t
+                    tile[ax] = best_t
+
     grid = tuple(grid_parts) if grid_parts else (1,)
+
+    # Enforce max_grid_product by scaling up tiles on tiled axes.
+    if max_grid_product is not None and grid_parts:
+        grid_product = 1
+        for g in grid_parts:
+            grid_product *= g
+        if grid_product > max_grid_product:
+            # Sort tiled axes by their grid contribution (descending)
+            # and increase tiles to reduce the grid.
+            tiled_axes = sorted(axis_to_grid.keys(),
+                                key=lambda ax: grid_parts[axis_to_grid[ax]],
+                                reverse=True)
+            for ax in tiled_axes:
+                if grid_product <= max_grid_product:
+                    break
+                gi = axis_to_grid[ax]
+                cur_grid = grid_parts[gi]
+                cur_tile = tile[ax]
+                dim = ref_shape[ax]
+                align = _align(ax)
+                # Target grid for this axis: proportional share of reduction
+                target_grid = max(1, int(cur_grid * max_grid_product / grid_product))
+                target_tile = (dim + target_grid - 1) // target_grid
+                # Round up to alignment
+                target_tile = ((target_tile + align - 1) // align) * align
+                target_tile = min(target_tile, dim)
+                # Find smallest aligned value >= target_tile that divides dim
+                # (or just use the rounded-up value if exact_only is False)
+                best_tile = dim  # fallback: full dim
+                if exact_only:
+                    for candidate in range(target_tile, dim + 1, align):
+                        if dim % candidate == 0:
+                            best_tile = candidate
+                            break
+                else:
+                    best_tile = target_tile
+                # Don't enlarge past VMEM budget for permutation kernels
+                if transpose and max_tile_elems is not None:
+                    cur_elems = 1
+                    for t in tile:
+                        cur_elems *= t
+                    max_for_ax = max_tile_elems * cur_tile // cur_elems
+                    best_tile = min(best_tile, max_for_ax)
+                    best_tile = (best_tile // align) * align
+                    best_tile = max(best_tile, cur_tile)
+                if best_tile > cur_tile:
+                    new_grid = (dim + best_tile - 1) // best_tile
+                    grid_product = grid_product * new_grid // cur_grid
+                    grid_parts[gi] = new_grid
+                    tile[ax] = best_tile
+            grid = tuple(grid_parts)
+
     return tuple(tile), grid, axis_to_grid
 
 
@@ -507,7 +659,7 @@ def pallas_make_block_spec(
     tile_shape: tuple[int, ...],
     axis_to_grid: dict[int, int],
     n_grid: int,
-    swap_last_two: bool = False,
+    permutation: "Optional[tuple[int, ...]]" = None,
     is_output: bool = False,
 ) -> Any:
     """Build a ``pl.BlockSpec`` for *buf_shape* given tiling of *ref_shape*.
@@ -520,8 +672,9 @@ def pallas_make_block_spec(
     so the ref dims map into the buffer.  Extra dims are kept at full size
     with index 0 in the index_map.
 
-    When *swap_last_two* is True, the last two buffer dims are swapped
-    relative to the reference: ref axis -2 maps to buf axis -1 and vice versa.
+    When *permutation* is given (a tuple mapping ref axis -> buf axis),
+    the buffer dimensions are accessed in permuted order relative to the
+    reference shape.  For example, permutation=(1, 0) swaps the last two.
 
     When *is_output* is True and *buf_nd < ref_nd*, left-alignment is used
     as a fallback (for reduction outputs whose trailing dims were reduced).
@@ -561,20 +714,17 @@ def pallas_make_block_spec(
                 bs[buf_ax] = tile_shape[ref_ax]
                 tiled_pairs.append((buf_ax, grid_dim))
 
-    elif swap_last_two and buf_nd >= 2 and ref_nd >= 2:
-        # Transposed buffer: last-2 dims of buf are swapped vs ref.
-        for ref_ax, grid_dim in axis_to_grid.items():
-            # Map ref axis to buf axis with swap on the last two
-            if ref_ax == ref_nd - 2:
-                buf_ax = buf_nd - 1
-            elif ref_ax == ref_nd - 1:
-                buf_ax = buf_nd - 2
-            else:
-                buf_ax = ref_ax - (ref_nd - buf_nd)
-
+    elif permutation is not None and buf_nd == ref_nd:
+        # Permuted buffer: set block sizes for ALL ref axes through the
+        # permutation.  For untiled axes tile_shape[ref_ax] == ref_shape[ref_ax],
+        # so bs gets the correct full extent rather than buf_shape[buf_ax]
+        # (which may be a different, larger dimension due to the permutation).
+        for ref_ax in range(ref_nd):
+            buf_ax = permutation[ref_ax]
             if 0 <= buf_ax < buf_nd and buf_shape[buf_ax] == ref_shape[ref_ax]:
                 bs[buf_ax] = tile_shape[ref_ax]
-                tiled_pairs.append((buf_ax, grid_dim))
+                if ref_ax in axis_to_grid:
+                    tiled_pairs.append((buf_ax, axis_to_grid[ref_ax]))
 
     else:
         # Standard right-alignment, with left-alignment fallback for
@@ -597,7 +747,7 @@ def pallas_make_block_spec(
 
     return pl.BlockSpec(
         tuple(bs),
-        _make_index_map(tiled_pairs, buf_nd, n_grid, swap_last_two=swap_last_two),
+        _make_index_map(tiled_pairs, buf_nd, n_grid),
     )
 
 
@@ -605,15 +755,11 @@ def _make_index_map(
     tiled_pairs: list[tuple[int, int]],
     buf_nd: int,
     n_grid: int,
-    swap_last_two: bool = False,
 ) -> Any:
     """Return an index_map callable for ``pl.BlockSpec``.
 
     *tiled_pairs* is a list of ``(buf_axis, grid_dim)`` indicating which
     buffer axes receive a grid index.  All other axes return 0 (full block).
-
-    When *swap_last_two* is True the grid args for the last two buffer dims
-    are swapped so that the tile iteration follows the transposed layout.
 
     All returned values are explicitly ``jnp.int32`` so that TPU Mosaic
     lowering (which rejects 64-bit types) works when ``jax_enable_x64`` is
