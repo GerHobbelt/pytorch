@@ -20,10 +20,13 @@ class ExtensionWrapperCodegen(wrapper.PythonWrapperCodegen):
     ):
         return ExtensionWrapperCodegen()
 
-    def _generate_kernel_call_helper(self, kernel_name, call_args, *, device=None, **kwargs):
+    def _generate_kernel_call_helper(
+        self, kernel_name, call_args, *, device=None, **kwargs
+    ):
         device = device or V.graph.get_current_device_or_throw()
         if device.type == "extension_device":
             import torch
+
             device = torch.device("cpu")
         super()._generate_kernel_call_helper(
             kernel_name, call_args, device=device, **kwargs
