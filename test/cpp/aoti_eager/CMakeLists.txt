@@ -1,3 +1,7 @@
+if(NOT BUILD_PYTHON)
+  return()
+endif()
+
 set(AOTI_EAGER_TEST_ROOT ${TORCH_ROOT}/test/cpp/aoti_eager)
 
 set(AOTI_EAGER_TEST_SRCS
@@ -14,7 +18,8 @@ target_compile_definitions(test_aoti_eager PRIVATE USE_GTEST)
 target_link_libraries(test_aoti_eager PRIVATE
   torch
   torch_python
-  ${TORCH_PYTHON_LINK_LIBRARIES}
+  Python::Module
+  pybind::pybind11
   gtest_main
 )
 
