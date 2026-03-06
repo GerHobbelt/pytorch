@@ -18,7 +18,7 @@ const at::cuda::NVRTC& get_nvrtc() {
   {                                                     \
     LOG(ERROR) << #fn << " returned error: " << result; \
     const char* errMsg = nullptr;                       \
-    get_nvrtc().cuGetErrorString(result, &errMsg);      \
+    (void)get_nvrtc().cuGetErrorString(result, &errMsg); \
     LOG(ERROR) << "cuGetErrorString: " << errMsg;       \
   }
 
