@@ -130,6 +130,7 @@ class ConstDictVariable(VariableTracker):
     }
 
     class _HashableTracker:
+        _MISSING = object()
         """
         Auxiliary opaque internal class that wraps a VariableTracker and makes it hashable
         This should not be seen or touched by anything outside of ConstDictVariable and its children
@@ -145,6 +146,50 @@ class ConstDictVariable(VariableTracker):
                 raise_unhashable(vt)
             self.vt = vt
 
+        @classmethod
+        def _maybe_constant_key(cls, vt: VariableTracker) -> object:
+            from .lists import SizeVariable
+            from .tensor import TensorVariable
+
+            if (
+                isinstance(vt, variables.LazyVariableTracker)
+                and not vt.is_realized()
+                and vt.is_hashable()
+            ):
+                return vt.original_value()
+
+            if vt.is_python_constant():
+                return vt.as_python_constant()
+
+            if isinstance(vt, TensorVariable):
+                proxy = getattr(vt, "proxy", None)
+                node = getattr(proxy, "node", None)
+                if node is None:
+                    return cls._MISSING
+
+                meta = getattr(node, "meta", None)
+                if not isinstance(meta, dict):
+                    return cls._MISSING
+
+                example_value = meta.get("example_value")
+                if isinstance(example_value, torch.Tensor) and example_value.numel() == 1:
+                    return example_value.item()
+                if isinstance(example_value, (int, bool)):
+                    return example_value
+
+                return cls._MISSING
+
+            if isinstance(vt, SizeVariable):
+                items = []
+                for item in vt.items:
+                    maybe_item = cls._maybe_constant_key(item)
+                    if maybe_item is cls._MISSING:
+                        return cls._MISSING
+                    items.append(maybe_item)
+                return torch.Size(items)
+
+            return cls._MISSING
+
         def __hash__(self) -> int:
             """
             Computes the hash value for the wrapped VariableTracker.
@@ -156,12 +201,9 @@ class ConstDictVariable(VariableTracker):
             Returns:
                 The hash value of the underlying variable tracker
             """
-            if (
-                isinstance(self.vt, variables.LazyVariableTracker)
-                and not self.vt.is_realized()
-                and self.vt.is_hashable()
-            ):
-                return hash(self.vt.original_value())
+            maybe_constant = self._maybe_constant_key(self.vt)
+            if maybe_constant is not self._MISSING:
+                return hash(maybe_constant)
             return self.vt.get_python_hash()
 
         def __eq__(self, other: object) -> bool:
@@ -181,6 +223,15 @@ class ConstDictVariable(VariableTracker):
                 return False
             if self.vt is other.vt:
                 return True
+
+            self_constant = self._maybe_constant_key(self.vt)
+            other_constant = self._maybe_constant_key(other.vt)
+            if (
+                self_constant is not self._MISSING
+                and other_constant is not self._MISSING
+            ):
+                return self_constant == other_constant
+
             return self.vt.is_python_equal(other.vt)
 
     def __init__(
@@ -268,24 +319,12 @@ class ConstDictVariable(VariableTracker):
     def __contains__(self, vt: VariableTracker) -> bool:
         assert isinstance(vt, VariableTracker)
         Hashable = ConstDictVariable._HashableTracker
-        if not vt.is_python_hashable():
+        if not is_hashable(vt):
             return False
-        if Hashable(vt) in self.items and not isinstance(
-            self.items[Hashable(vt)], variables.DeletedVariable
-        ):
-            return True
-        if vt.is_python_constant():
-            try:
-                const_vt = VariableTracker.build(
-                    None, vt.as_python_constant()
-                )
-                if const_vt.is_python_hashable() and Hashable(const_vt) in self.items:
-                    return not isinstance(
-                        self.items[Hashable(const_vt)], variables.DeletedVariable
-                    )
-            except Exception:
-                pass
-        return False
+        key = Hashable(vt)
+        return key in self.items and not isinstance(
+            self.items[key], variables.DeletedVariable
+        )
 
     def call_tree_map_branch(
         self,
@@ -787,29 +826,7 @@ class ConstDictVariable(VariableTracker):
                     f"{len(args)} args and {len(kwargs)} kwargs",
                 )
 
-            from .lists import SizeVariable
-            from .tensor import TensorVariable
-
             key = args[0]
-            if isinstance(key, SizeVariable) and key not in self:
-                try:
-                    resolved_items = []
-                    for item in key.items:
-                        if item.is_python_constant():
-                            resolved_items.append(item.as_python_constant())
-                        elif isinstance(item, TensorVariable):
-                            example = item.as_proxy().node.meta.get("example_value", None)
-                            if example is not None:
-                                resolved_items.append(example.item())
-                            else:
-                                raise NotImplementedError
-                        else:
-                            raise NotImplementedError
-                    const_key = torch.Size(resolved_items)
-                    key = VariableTracker.build(tx, const_key)
-                except (NotImplementedError, RuntimeError):
-                    pass
-
             arg_hashable = is_hashable(key)
             if not arg_hashable:
                 raise_unhashable(key, tx)
