@@ -6,14 +6,14 @@
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
 #else
-#include <ATen/ops/_assert_async.h>
+#include <ATen/ops/_functional_assert_async.h>
+#include <ATen/ops/add.h>
 #include <ATen/ops/all.h>
-#include <ATen/ops/arange.h>
 #include <ATen/ops/empty.h>
-#include <ATen/ops/eq.h>
 #include <ATen/ops/ge.h>
 #include <ATen/ops/lt.h>
 #include <ATen/ops/one_hot_native.h>
+#include <ATen/ops/scatter.h>
 #include <ATen/ops/zeros.h>
 #endif
 
@@ -29,21 +29,25 @@ Tensor one_hot(const Tensor &self, int64_t num_classes) {
         if (num_classes == -1) {
           num_classes = self.max().item().toLong() + 1;
         }
-        // Validate index bounds. _assert_async traces into the compiled graph
-        // so these checks run at execution time without a host-device sync.
-        if (self.sym_numel() > 0) {
-          at::_assert_async(at::all(at::ge(self, 0)),
-              "one_hot: Class values must be non-negative.");
-          at::_assert_async(at::all(at::lt(self, num_classes)),
-              "one_hot: Class values must be smaller than num_classes.");
-        }
-        {
-          // If `self` is a DTensor, then allow implicit replication
-          // of the `index` Tensor.
-          at::DTensorAllowImplicitReplication guard;
-          at::Tensor index = at::arange(num_classes, self.options());
-          return at::eq(self.unsqueeze(-1), index).to(kLong);
-        }
+        // Validate index bounds using _functional_assert_async so the
+        // assertions survive functionalization and appear in the compiled graph.
+        // _assert_async (non-functional, void-returning) gets dropped during
+        // CIA decomposition tracing because proxy tracing doesn't capture
+        // void-returning ops.
+        auto dep = at::zeros({}, self.options().dtype(kLong));
+        dep = at::_functional_assert_async(at::all(at::ge(self, 0)),
+            "one_hot: Class values must be non-negative.", dep);
+        dep = at::_functional_assert_async(at::all(at::lt(self, num_classes)),
+            "one_hot: Class values must be smaller than num_classes.", dep);
+        // Use scatter which gets bounds checking through indirect indexing
+        // (check_bounds), supported on all backends including MPS.
+        auto shape = self.sym_sizes().vec();
+        shape.emplace_back(num_classes);
+        at::Tensor ret = at::zeros_symint(shape, self.options());
+        ret.scatter_(-1, self.unsqueeze(-1), 1);
+        // dep is always zero; adding it creates a data dependency on the
+        // assertions, preventing dead code elimination in the compiled graph.
+        return at::add(ret, dep);
     }
 
     auto shape = self.sym_sizes().vec();

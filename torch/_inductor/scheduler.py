@@ -1846,6 +1846,10 @@ class SchedulerNode(BaseSchedulerNode):
                     )
         return buffers_store_as_atomic_add
 
+    @cache_on_self
+    def has_side_effects(self) -> bool:
+        return super().has_side_effects()
+
 
 def refresh_group_node_dependencies(
     group_snode: FusedSchedulerNode | GroupedSchedulerNode,

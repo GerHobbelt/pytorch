@@ -1689,8 +1689,9 @@ def lower_assert_async(cond, msg):
 
 
 @register_lowering(aten._functional_assert_async.msg)
-def lower_assert_functional_async(cond, msg):
-    return _assert_async(cond, msg)
+def lower_assert_functional_async(cond, msg, dep_token=None):
+    _assert_async(cond, msg)
+    return dep_token
 
 
 @register_lowering(

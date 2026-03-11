@@ -646,9 +646,12 @@ class ShardingPropagator:
         torch._C._log_api_usage_once(
             "torch.distributed.tensor._sharding_prop.ShardingPropagator.propogate_op_sharding_non_cached"
         )
-        # special case op, we don't need to propagate for local
-        # scalar. TODO: figure out a better way to handle this
-        if op_schema.op is aten._local_scalar_dense.default:
+        # special case ops that don't produce tensor outputs
+        # TODO: figure out a better way to handle this
+        if op_schema.op in (
+            aten._local_scalar_dense.default,
+            aten._assert_async.msg,
+        ):
             return OutputSharding(None, op_schema)
 
         out_tensor_meta = self._propagate_tensor_meta_non_cached(op_schema)
