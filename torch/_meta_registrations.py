@@ -2593,7 +2593,21 @@ def meta_conv(
     if guard_or_false(input_tensor.size(input_channels_dim) == 0):
         shape_out[output_channels_dim] = 0
 
-    out = input_tensor.new_empty(shape_out)
+    # Match backend output memory format: GPU backends (cuDNN, MPS) and CPU
+    # backends (MKLDNN, THNN) return channels_last output when either input or
+    # weight is channels_last.  Predicting the wrong format here causes Inductor
+    # to generate indexing code for the wrong layout, leading to silent accuracy
+    # regressions (see https://github.com/pytorch/pytorch/issues/138652).
+    input_fmt = suggest_memory_format(input_tensor)
+    weight_fmt = suggest_memory_format(weight)
+    if input_fmt == torch.channels_last or weight_fmt == torch.channels_last:
+        memory_format = torch.channels_last
+    elif input_fmt == torch.channels_last_3d or weight_fmt == torch.channels_last_3d:
+        memory_format = torch.channels_last_3d
+    else:
+        memory_format = torch.contiguous_format
+
+    out = input_tensor.new_empty(shape_out).to(memory_format=memory_format)
     return out
 
 

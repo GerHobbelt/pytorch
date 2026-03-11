@@ -5141,6 +5141,26 @@ class CommonTemplate:
             check_lowp=False,
         )
 
+    def test_conv2d_non_contiguous_channels_last_input(self):
+        """Regression test: conv2d on a tensor with channels-last-like strides
+        (from transpose+view) must produce correct results after compilation.
+        See https://github.com/pytorch/pytorch/issues/138652
+        """
+
+        def fn(x, weight, bias):
+            # transpose+view creates channels-last strides without explicit .contiguous()
+            x_4d = x.transpose(1, 2).view(1, 128, 8, 8)
+            return torch.conv2d(x_4d, weight, bias, padding=1, groups=128)
+
+        x = torch.randn(1, 64, 128)
+        weight = torch.randn(128, 1, 3, 3)
+        bias = torch.randn(128)
+        self.common(
+            fn,
+            (x, weight, bias),
+            check_lowp=False,
+        )
+
     def test_conv2d_backward_channels_last(self):
         def fn(grad_output, inp, weight):
             convolution_backward_8 = torch.ops.aten.convolution_backward.default(

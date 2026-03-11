@@ -1831,6 +1831,34 @@ class FakeTensorOperatorInvariants(TestCase):
             self.assertTrue(grad_input_c.is_contiguous())
             self.assertTrue(grad_weight_c.is_contiguous())
 
+    def test_convolution_channels_last_memory_format(self):
+        """Regression test: meta convolution must predict channels_last output
+        strides when inputs are channels_last, matching backend behavior.
+        See https://github.com/pytorch/pytorch/issues/138652
+        """
+        with FakeTensorMode():
+            # channels_last input: output should be channels_last
+            inp_cl = torch.randn(2, 3, 4, 4).to(memory_format=torch.channels_last)
+            weight = torch.randn(3, 3, 3, 3)
+            out = torch.ops.aten.convolution(
+                inp_cl, weight, None, [1, 1], [1, 1], [1, 1], False, [0, 0], 1
+            )
+            self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
+
+            # channels_last weight: output should be channels_last
+            inp = torch.randn(2, 3, 4, 4)
+            weight_cl = weight.to(memory_format=torch.channels_last)
+            out = torch.ops.aten.convolution(
+                inp, weight_cl, None, [1, 1], [1, 1], [1, 1], False, [0, 0], 1
+            )
+            self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
+
+            # contiguous inputs: output should be contiguous
+            out = torch.ops.aten.convolution(
+                inp, weight, None, [1, 1], [1, 1], [1, 1], False, [0, 0], 1
+            )
+            self.assertTrue(out.is_contiguous())
+
     def test_no_dispatch_with_like_function(self):
         class CountingMode(TorchDispatchMode):
             def __init__(self) -> None:
