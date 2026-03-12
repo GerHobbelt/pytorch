@@ -1859,6 +1859,51 @@ class FakeTensorOperatorInvariants(TestCase):
             )
             self.assertTrue(out.is_contiguous())
 
+    def test_convolution_unbacked_symint_strides(self):
+        """suggest_memory_format makes stride comparisons that produce
+        data-dependent guards on unbacked symbolic strides.  The meta
+        registrations should fall back to contiguous format instead of
+        raising.
+        """
+
+        def forward_fn(x, w):
+            return torch.ops.aten.convolution(
+                x, w, None, [1, 1], [1, 1], [1, 1], False, [0, 0], 1
+            )
+
+        def backward_fn(grad_out, x, w):
+            return torch.ops.aten.convolution_backward(
+                grad_out,
+                x,
+                w,
+                [3],
+                [1, 1],
+                [1, 1],
+                [1, 1],
+                False,
+                [0, 0],
+                1,
+                [True, True, True],
+            )
+
+        torch._dynamo.reset()
+        x = torch.randn(2, 3, 4, 4)
+        w = torch.randn(3, 3, 3, 3)
+        torch._dynamo.decorators.mark_unbacked(x, 0)
+        torch._dynamo.decorators.mark_unbacked(w, 0)
+        compiled = torch.compile(forward_fn, backend="eager", fullgraph=True)
+        compiled(x, w)
+
+        torch._dynamo.reset()
+        grad_out = torch.randn(2, 3, 4, 4)
+        x = torch.randn(2, 3, 4, 4)
+        w = torch.randn(3, 3, 3, 3)
+        torch._dynamo.decorators.mark_unbacked(grad_out, 0)
+        torch._dynamo.decorators.mark_unbacked(x, 0)
+        torch._dynamo.decorators.mark_unbacked(w, 0)
+        compiled = torch.compile(backward_fn, backend="eager", fullgraph=True)
+        compiled(grad_out, x, w)
+
     def test_no_dispatch_with_like_function(self):
         class CountingMode(TorchDispatchMode):
             def __init__(self) -> None:

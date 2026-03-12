@@ -2563,6 +2563,17 @@ def meta_miopen_batch_norm(
     return out, save_mean, save_var
 
 
+def _conv_memory_format_for(*tensors: torch.Tensor) -> torch.memory_format:
+    """Infer the output memory format for convolution from its input tensors."""
+    for t in tensors:
+        fmt = suggest_memory_format(t)
+        if fmt == torch.channels_last:
+            return torch.channels_last
+        if fmt == torch.channels_last_3d:
+            return torch.channels_last_3d
+    return torch.contiguous_format
+
+
 @register_meta(aten.convolution.default)
 def meta_conv(
     input_tensor: torch.Tensor,
@@ -2598,16 +2609,14 @@ def meta_conv(
     # weight is channels_last.  Predicting the wrong format here causes Inductor
     # to generate indexing code for the wrong layout, leading to silent accuracy
     # regressions (see https://github.com/pytorch/pytorch/issues/138652).
-    input_fmt = suggest_memory_format(input_tensor)
-    weight_fmt = suggest_memory_format(weight)
-    if input_fmt == torch.channels_last or weight_fmt == torch.channels_last:
-        memory_format = torch.channels_last
-    elif input_fmt == torch.channels_last_3d or weight_fmt == torch.channels_last_3d:
-        memory_format = torch.channels_last_3d
-    else:
-        memory_format = torch.contiguous_format
+    memory_format = _conv_memory_format_for(input_tensor, weight)
 
-    out = input_tensor.new_empty(shape_out).to(memory_format=memory_format)
+    out = torch.empty(
+        shape_out,
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+        memory_format=memory_format,
+    )
     return out
 
 
@@ -3674,26 +3683,22 @@ def meta_convolution_backward(
     # Memory format inference rules (matching backend behavior):
     #   - grad_input format: derived from grad_output and weight
     #   - grad_weight format: derived from input and grad_output
-    def _conv_memory_format(t1, t2):
-        # Match the logic in cudnn_conv_suggest_memory_format and mps_conv_use_channels_last:
-        # Use channels_last if either tensor suggests it
-        fmt1 = suggest_memory_format(t1)
-        fmt2 = suggest_memory_format(t2)
-        if fmt1 == torch.channels_last or fmt2 == torch.channels_last:
-            return torch.channels_last
-        if fmt1 == torch.channels_last_3d or fmt2 == torch.channels_last_3d:
-            return torch.channels_last_3d
-        return torch.contiguous_format
 
     if output_mask[0]:
-        memory_format = _conv_memory_format(grad_output_, weight_)
-        backend_grad_input = grad_output_.new_empty(input_.size()).to(
-            memory_format=memory_format
+        memory_format = _conv_memory_format_for(grad_output_, weight_)
+        backend_grad_input = torch.empty(
+            input_.size(),
+            dtype=grad_output_.dtype,
+            device=grad_output_.device,
+            memory_format=memory_format,
         )
     if output_mask[1]:
-        memory_format = _conv_memory_format(input_, grad_output_)
-        backend_grad_weight = grad_output_.new_empty(weight_.size()).to(
-            memory_format=memory_format
+        memory_format = _conv_memory_format_for(input_, grad_output_)
+        backend_grad_weight = torch.empty(
+            weight_.size(),
+            dtype=grad_output_.dtype,
+            device=grad_output_.device,
+            memory_format=memory_format,
         )
     if output_mask[2]:
         backend_grad_bias = grad_output_.new_empty(bias_sizes_opt)
