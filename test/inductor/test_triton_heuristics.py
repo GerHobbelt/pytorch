@@ -693,6 +693,40 @@ class TestHIPInvalidConfigHandling(TestCase):
         expected = x * 2.0
         torch.testing.assert_close(y, expected)
 
+class TestGridExprMaximum(TestCase):
+    """Tests for GridExpr.maximum() code generation - specifically the C++ type casting fix"""
+
+    def _create_grid_expr(self, mode: str):
+        """Helper to create a GridExpr instance for testing."""
+        from torch._inductor.runtime.triton_heuristics import Grid1D
+
+        return Grid1D(inductor_meta={}, mode=mode)
+
+    def test_maximum_cpp_mode_casts_int_constants_to_long(self):
+        """
+        In C++ mode, int constants should be cast to (long) to avoid
+        type deduction errors with std::max when mixing long variables
+        with int literals.
+        """
+        grid = self._create_grid_expr("cpp")
+        result = grid.maximum(["ynumel_0", "ynumel_1", 4480])
+        self.assertIn("(long)4480", result)
+        self.assertIn("std::max", result)
+
+    def test_maximum_cpp_mode_only_variables_no_cast(self):
+        """When there are only string variables, no casting should occur."""
+        grid = self._create_grid_expr("cpp")
+        result = grid.maximum(["xnumel", "ynumel", "znumel"])
+        self.assertNotIn("(long)", result)
+        self.assertIn("std::max", result)
+
+    def test_maximum_all_ints_constant_folds(self):
+        """When all inputs are ints, maximum() should constant-fold to a single int."""
+        grid = self._create_grid_expr("cpp")
+        result = grid.maximum([10, 20, 5, 15])
+        self.assertEqual(result, 20)
+        self.assertIsInstance(result, int)
+
 
 if __name__ == "__main__":
     if IS_LINUX and HAS_GPU:
