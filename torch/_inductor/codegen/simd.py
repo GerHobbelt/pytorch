@@ -1677,9 +1677,13 @@ class SIMDScheduling(BaseScheduling):
             converted = subnode.extract_pw_from_reduction()
             converted.swap_pw_red_dimension()
             converted_nodes.append(converted)
-        node_schedule = self.generate_node_schedule(
-            node1.get_nodes() + converted_nodes, numel, rnumel
-        )
+
+        # Fix groups that may have wrong factorization from simplify_and_reorder()
+        all_nodes = node1.get_nodes() + converted_nodes
+        for subnode in all_nodes:
+            subnode.group = (subnode.group[0], (numel, rnumel))
+
+        node_schedule = self.generate_node_schedule(all_nodes, numel, rnumel)
         kernel_features = SIMDKernelFeatures(node_schedule, numel, rnumel)
 
         # The autotuning is skipped in deterministic mode
