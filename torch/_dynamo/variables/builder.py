@@ -643,9 +643,20 @@ class VariableBuilder:
         )
 
     def wrap_jit_function(self, value: Any) -> WrapperUserFunctionVariable:
+        if not hasattr(value, "_torchdynamo_inline"):
+            unimplemented(
+                gb_type="wrap_jit_function: missing _torchdynamo_inline",
+                context=f"type: {type(value).__name__}",
+                explanation="Dynamo expected a JIT function with a _torchdynamo_inline attribute, "
+                "but the object does not have one.",
+                hints=[*graph_break_hints.SUPPORTABLE],
+            )
         self.install_guards(GuardBuilder.TYPE_MATCH)
         return WrapperUserFunctionVariable(
-            value, "_torchdynamo_inline", source=self.source
+            value,
+            "_torchdynamo_inline",
+            source=self.source,
+            mutation_type=AttributeMutationExisting(),
         )
 
     def wrap_mapping_proxy(self, value: Any) -> VariableTracker:
@@ -1381,11 +1392,19 @@ class VariableBuilder:
         elif inspect.getattr_static(value, "__script_if_tracing_wrapper", False):
             self.install_guards(GuardBuilder.TYPE_MATCH)
             return WrapperUserFunctionVariable(
-                value, "__original_fn", source=self.source
+                value,
+                "__original_fn",
+                source=self.source,
+                mutation_type=AttributeMutationExisting(),
             )
         elif is_lru_cache_wrapped_function(value):
             self.install_guards(GuardBuilder.TYPE_MATCH)
-            return WrapperUserFunctionVariable(value, "__wrapped__", source=self.source)
+            return WrapperUserFunctionVariable(
+                value,
+                "__wrapped__",
+                source=self.source,
+                mutation_type=AttributeMutationExisting(),
+            )
         elif value is sys.exc_info or (
             sys.version_info >= (3, 11) and value is sys.exception
         ):
@@ -1395,7 +1414,10 @@ class VariableBuilder:
         ):
             self.install_guards(GuardBuilder.TYPE_MATCH)
             return WrapperUserFunctionVariable(
-                value, "_torchdynamo_inline", source=self.source
+                value,
+                "_torchdynamo_inline",
+                source=self.source,
+                mutation_type=AttributeMutationExisting(),
             )
         elif value is collections.namedtuple:
             self.install_guards(GuardBuilder.ID_MATCH)

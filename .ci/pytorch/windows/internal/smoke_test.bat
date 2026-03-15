@@ -5,7 +5,8 @@ pushd %SRC_DIR%\..
 if not "%CUDA_VERSION%" == "cpu" if not "%CUDA_VERSION%" == "xpu" call internal\driver_update.bat
 if errorlevel 1 exit /b 1
 
-if not "%CUDA_VERSION%" == "cpu" if not "%CUDA_VERSION%" == "xpu" call internal\cuda_install.bat
+echo "Check if CUDA and CUDNN versions need to be updated"
+call internal\cuda_install.bat
 if errorlevel 1 exit /b 1
 
 if "%CUDA_VERSION%" == "xpu" (

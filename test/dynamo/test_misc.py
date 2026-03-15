@@ -6406,6 +6406,25 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         opt_fn(torch.int16, torch.ShortTensor)
         opt_fn(torch.bool, torch.BoolTensor)
 
+    @unittest.skipIf(not torch.distributed.is_available(), "requires distributed")
+    def test_or_union_type_opaque_class(self):
+        # Test that or_ on opaque class types (e.g. Shard | _StridedShard)
+        # doesn't cause a graph break.
+        from torch.distributed.tensor import Shard
+        from torch.distributed.tensor.placement_types import _StridedShard
+
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @torch.compile(backend=cnt, fullgraph=True)
+        def fn(x):
+            _ = Shard | _StridedShard
+            return x + 1
+
+        x = torch.randn(4)
+        result = fn(x)
+        self.assertEqual(result, x + 1)
+        self.assertEqual(cnt.frame_count, 1)
+
     def test_nan(self):
         def f(x, n):
             return x * 2 + n
@@ -14148,6 +14167,39 @@ fn
         ref = f(x)
         res = opt_f(x)
         self.assertEqual(ref, res)
+
+    @torch._dynamo.config.patch(
+        capture_scalar_outputs=True, capture_dynamic_output_shape_ops=True
+    )
+    def test_new_tensor_break(self):
+        a = torch.tensor([1, 0, 0, 5])
+
+        cases = {
+            "scalar": lambda a: a.new_tensor([a.nonzero().squeeze(-1).numel()]),
+            "multi": lambda a: (
+                n := a.nonzero().squeeze(-1).numel(),
+                a.new_tensor([n, n + 1, n * 2]),
+            )[-1],
+            "mixed_shape": lambda a: (
+                n := a.nonzero().squeeze(-1).numel(),
+                a.new_tensor([n * a.shape[0], n + a.shape[0], a.shape[0] - n]),
+            )[-1],
+            "nested": lambda a: (
+                n := a.nonzero().squeeze(-1).numel(),
+                a.new_tensor([[n, n + 1], [n * 2, n - 1]]),
+            )[-1],
+            "with_zero": lambda a: (
+                n := a.nonzero().squeeze(-1).numel(),
+                a.new_tensor([0, n, n * n]),
+            )[-1],
+        }
+
+        for name, fn in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(
+                    torch.compile(fn, fullgraph=True, backend="eager")(a),
+                    fn(a),
+                )
 
     @torch._dynamo.config.patch(capture_scalar_outputs=True)
     def test_builtin_bool_on_tensor(self):
