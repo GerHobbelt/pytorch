@@ -20,12 +20,7 @@ from torch.distributed.utils import _apply_to_tensors, _to_kwargs
 from torch.utils._pytree import tree_flatten
 
 from ._fsdp_api import MixedPrecisionPolicy
-from ._fsdp_common import (
-    _cast_fp_tensor,
-    compiled_autograd_enabled,
-    detect_compiled_autograd,
-    TrainingState,
-)
+from ._fsdp_common import _cast_fp_tensor, _dynamo_disable, TrainingState
 from ._fsdp_param_group import FSDPCommContext, FSDPParamGroup
 
 
@@ -55,21 +50,6 @@ class FSDPStateContext(Generic[_StateType]):
         # Optional user-provided event recorded after optimizer for the
         # all-gather streams to wait on in the root pre-forward
         self.post_optim_event: torch.Event | None = None
-
-
-def disable_if_config_true(func):
-    @functools.wraps(func)
-    def fsdp_hook_wrapper(*args, **kwargs):
-        if torch._dynamo.config.skip_fsdp_hooks:
-            return torch._dynamo.disable(
-                func,
-                recursive=True,
-                reason="skipping FSDP hooks since torch._dynamo.config.skip_fsdp_hooks is set",
-            )(*args, **kwargs)
-        else:
-            return func(*args, **kwargs)
-
-    return fsdp_hook_wrapper
 
 
 class FSDPState(_State):
@@ -155,8 +135,7 @@ class FSDPState(_State):
         self._lazy_init()
         if self._state_ctx.iter_forward_root is not None:
             return args, kwargs
-        if not compiled_autograd_enabled():
-            logger.debug("FSDP::root_pre_forward")
+        logger.debug("FSDP::root_pre_forward")
         self._state_ctx.iter_forward_root = self
         with torch.profiler.record_function("FSDP::root_pre_forward"):
             # Wait for optimizer before implicitly prefetched all-gathers
@@ -196,7 +175,6 @@ class FSDPState(_State):
             raise RuntimeError(
                 f"{self._state_name} requires a single root module but got {self._modules}"
             )
-        detect_compiled_autograd()
         root_module = self._modules[0]
         visited_states: set[FSDPState] = set()
         for module_name, module in root_module.named_modules():
@@ -270,7 +248,7 @@ class FSDPState(_State):
                         module_fqn += f", {module_name}"
                         fsdp_param_group._module_fqn = module_fqn
 
-    @disable_if_config_true
+    @_dynamo_disable
     def _pre_forward(
         self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -303,7 +281,7 @@ class FSDPState(_State):
                 FSDPParamGroup._prefetch_unshard(target_param_group, "forward")
         return args, kwargs
 
-    @disable_if_config_true
+    @_dynamo_disable
     def _post_forward(self, module: nn.Module, input: Any, output: Any) -> Any:
         # When composing with module-hook-based activation checkpointing, the
         # post-backward hook is responsible for the reshard
@@ -331,6 +309,7 @@ class FSDPState(_State):
                 )
         return output
 
+    @_dynamo_disable
     def _pre_backward(self, grad: torch.Tensor) -> torch.Tensor:
         self._training_state = TrainingState.PRE_BACKWARD
         self._register_root_post_backward_final_callback()
@@ -342,9 +321,9 @@ class FSDPState(_State):
                 FSDPParamGroup._prefetch_unshard(target_param_group, "backward")
         return grad
 
+    @_dynamo_disable
     def _root_post_backward_final_callback(self) -> None:
-        if not compiled_autograd_enabled():
-            logger.debug("FSDP::root_post_backward")
+        logger.debug("FSDP::root_post_backward")
         with torch.profiler.record_function("FSDP::root_post_backward_callback"):
             for state in self._state_ctx.all_states:
                 for fsdp_param_group in state._fsdp_param_groups:
@@ -419,14 +398,14 @@ def _register_group_forward_hooks(
     """
     modules_set = set(modules)
 
-    @disable_if_config_true
+    @_dynamo_disable
     @functools.wraps(pre_hook)
     def wrapped_pre_hook(*args: Any, **kwargs: Any):
         if len(modules_to_run) == 0:  # first to run
             modules_to_run.update(modules_set)
             return pre_hook(*args, **kwargs)
 
-    @disable_if_config_true
+    @_dynamo_disable
     def get_wrapped_post_hook(module: nn.Module):
         @functools.wraps(post_hook)
         def wrapped_post_hook(*args: Any, **kwargs: Any):
