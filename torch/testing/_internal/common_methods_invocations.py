@@ -18072,9 +18072,8 @@ op_db: list[OpInfo] = [
     OpInfo('narrow_copy',
            dtypes=all_types_and_complex_and(torch.bool, torch.bfloat16, torch.float16, torch.chalf),
            supports_out=True,
-           supports_forward_ad=False,
-           supports_fwgrad_bwgrad=False,
-           supports_autograd=False,
+           supports_forward_ad=True,
+           supports_fwgrad_bwgrad=True,
            # https://github.com/pytorch/pytorch/issues/86931
            sample_inputs_func=partial(sample_inputs_narrow_narrow_copy, is_narrow=False),
            reference_inputs_func=partial(reference_inputs_narrow_narrow_copy, is_narrow=False),
@@ -19306,9 +19305,6 @@ op_db: list[OpInfo] = [
                DecorateInfo(unittest.expectedFailure, 'TestSchemaCheckModeOpInfo', 'test_schema_correctness',
                             dtypes=(torch.complex64, torch.complex128)),
                DecorateInfo(slowTest, 'TestCompositeCompliance', 'test_forward_ad'),
-               # MPS matmul aborts with uint8 input
-               DecorateInfo(unittest.skip("MPS driver aborts process on uint8 matmul"), 'TestCommon', 'test_dtypes',
-                            device_type='mps'),
            )),
     OpInfo('pca_lowrank',
            op=lambda *args, **kwargs: wrapper_set_seed(
