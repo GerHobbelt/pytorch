@@ -3774,8 +3774,8 @@ def meta__int_mm(a, b):
     torch._check(a.dim() == 2, lambda: "a must be a 2D tensor")
     torch._check(b.dim() == 2, lambda: "b must be a 2D tensor")
     torch._check(
-        a.dtype is torch.int8,
-        lambda: f"expected self to be int8, got {a.dtype}",
+        a.dtype in [torch.int8, torch.uint8],
+        lambda: f"expected self to be int8 or uint8, got {a.dtype}",
     )
     torch._check(
         b.dtype is torch.int8,
@@ -6339,6 +6339,7 @@ def meta__flash_attention_forward(
     window_size_right: int | None = None,
     seqused_k: Tensor | None = None,
     alibi_slopes: Tensor | None = None,
+    block_table: Tensor | None = None,
 ):
     # NB: there are two underlying paths:
     # 1. normal dense path; expect 4D inputs of shape (batch_size, seqlen, num_heads, head_dim)
@@ -6396,6 +6397,47 @@ def meta__flash_attention_forward(
         offset,
         debug_mask,
     )
+
+
+@register_meta([aten._flash_attention_forward_no_dropout_inplace.default])
+def meta__flash_attention_forward_no_dropout_inplace(
+    out: Tensor,
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    cum_seq_q: Tensor | None,
+    cum_seq_k: Tensor | None,
+    max_q: int,
+    max_k: int,
+    dropout_p: float,
+    is_causal: bool,
+    return_debug_mask: bool,
+    scale: float | None = None,
+    window_size_left: int | None = None,
+    window_size_right: int | None = None,
+    seqused_k: Tensor | None = None,
+    alibi_slopes: Tensor | None = None,
+    block_table: Tensor | None = None,
+):
+    _, logsumexp, _, _, _ = meta__flash_attention_forward(
+        query,
+        key,
+        value,
+        cum_seq_q,
+        cum_seq_k,
+        max_q,
+        max_k,
+        dropout_p,
+        is_causal,
+        return_debug_mask,
+        scale,
+        window_size_left,
+        window_size_right,
+        seqused_k,
+        alibi_slopes,
+        block_table,
+    )
+    return logsumexp
 
 
 @register_meta([aten._flash_attention_forward.quantized])
