@@ -447,6 +447,8 @@ test_dynamo_wrapped_shard() {
 }
 
 test_einops() {
+  pip install einops==0.5.0
+  time python test/run_test.py --einops --verbose --upload-artifacts-while-running
   pip install einops==0.6.1
   time python test/run_test.py --einops --verbose --upload-artifacts-while-running
   pip install einops==0.7.0
@@ -1152,6 +1154,18 @@ test_libtorch_jit() {
   pushd test
   python cpp/jit/tests_setup.py shutdown
   popd
+}
+
+test_libtorch_profiler() {
+  echo "Testing profiler C++ tests"
+  export CPP_TESTS_DIR="${TORCH_BIN_DIR}"
+  export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:${LD_LIBRARY_PATH}"
+
+  # Run E2E test first (needs clean Kineto state)
+  python test/run_test.py --cpp --verbose -i cpp/test_privateuse1_profiler -k "EndToEndProfiling"
+
+  # Run all other tests
+  python test/run_test.py --cpp --verbose -i cpp/test_privateuse1_profiler -k "not EndToEndProfiling"
 }
 
 test_libtorch_api() {
@@ -2018,6 +2032,7 @@ elif [[ "${SHARD_NUMBER}" == 2 && $NUM_TEST_SHARDS -gt 1 ]]; then
   test_custom_script_ops
   test_custom_backend
   test_torch_function_benchmark
+  test_libtorch_profiler
 elif [[ "${SHARD_NUMBER}" -gt 2 ]]; then
   # Handle arbitrary number of shards
   install_torchvision
