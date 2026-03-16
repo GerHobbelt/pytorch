@@ -321,12 +321,13 @@ class UserDefinedClassVariable(UserDefinedVariable):
             obj = inspect.getattr_static(self.value, name)
         except AttributeError:
             if type(self.value) is type:
+                error_message = VariableTracker.build(
+                    tx, f"type object '{self.value.__name__}' has no attribute '{name}'"
+                )
                 raise_observed_exception(
                     AttributeError,
                     tx,
-                    args=[
-                        f"type object '{self.value.__name__}' has no attribute '{name}'"
-                    ],
+                    args=[error_message],
                 )
 
         if name == "__new__" and UserDefinedClassVariable.is_supported_new_method(obj):
@@ -1409,6 +1410,22 @@ class UserDefinedObjectVariable(UserDefinedVariable):
                 else:
                     args = [desc_var, self, value]  # __set__(desc, self, value)
                 return func_var.call_function(tx, args, {})
+
+            # Handle Python property descriptors whose __set__ is a C slot
+            # wrapper (not a Python function), which the above check misses.
+            # Mirrors the property getter handling in var_getattr.
+            descriptor = inspect.getattr_static(type(self.value), name_str, None)
+            if isinstance(descriptor, property) and descriptor.fset is not None:
+                fset_source = None
+                if self.cls_source:
+                    fset_source = AttrSource(
+                        self.get_source_by_walking_mro(tx, name_str), "fset"
+                    )
+                fset_var = VariableTracker.build(
+                    tx, descriptor.fset, source=fset_source
+                )
+                return fset_var.call_function(tx, [self, value], {})
+
             # NOTE: else we assume the descriptor (if any) has a
             # side-effect-free `__set__` as far as Dynamo tracing is concerned.
 
@@ -1737,12 +1754,14 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         if tx.output.side_effects.has_pending_mutation_of_attr(self, name):
             result = tx.output.side_effects.load_attr(self, name, deleted_ok=True)
             if isinstance(result, variables.DeletedVariable):
+                error_message = VariableTracker.build(
+                    tx,
+                    f"'{type(self.value).__name__}' object has no attribute '{name}'",
+                )
                 raise_observed_exception(
                     AttributeError,
                     tx,
-                    args=[
-                        f"'{type(self.value).__name__}' object has no attribute '{name}'"
-                    ],
+                    args=[error_message],
                 )
             return result
 
@@ -1863,10 +1882,13 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             )
 
         # Step 7: AttributeError.
+        error_message = VariableTracker.build(
+            tx, f"'{type(self.value).__name__}' object has no attribute '{name}'"
+        )
         raise_observed_exception(
             AttributeError,
             tx,
-            args=[f"'{type(self.value).__name__}' object has no attribute '{name}'"],
+            args=[error_message],
         )
 
     def resolve_data_descriptor(
@@ -1901,12 +1923,13 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         try:
             resolved = type(self.value).__getattribute__(self.value, name)
         except AttributeError:
+            error_message = VariableTracker.build(
+                tx, f"'{type(self.value).__name__}' object has no attribute '{name}'"
+            )
             raise_observed_exception(
                 AttributeError,
                 tx,
-                args=[
-                    f"'{type(self.value).__name__}' object has no attribute '{name}'"
-                ],
+                args=[error_message],
             )
         return VariableTracker.build(tx, resolved, source)
 

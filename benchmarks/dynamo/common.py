@@ -3641,7 +3641,6 @@ def parse_args(args=None):
             "int8dynamic",
             "int8weightonly",
             "int4weightonly",
-            "autoquant",
             "noquant",
         ],
         default=None,
