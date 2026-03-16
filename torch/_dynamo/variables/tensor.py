@@ -1432,13 +1432,13 @@ class TensorVariable(VariableTracker):
         value: Any | None = None,
     ) -> Any | None:
         if value is not None and config.enable_dynamo_decompositions:
-            from .. import polyfills
+            from torch._inductor import inductor_prims
 
-            return tx.inline_user_function_return(
-                VariableTracker.build(tx, polyfills.addcmul_inplace),
-                [self, tensor1, tensor2, value],
-                {},
-            )
+            mul_var = variables.TorchInGraphFunctionVariable(torch.mul)
+            fma_var = variables.TorchInGraphFunctionVariable(inductor_prims.fma)
+            product = mul_var.call_function(tx, [tensor1, tensor2], {})
+            result = fma_var.call_function(tx, [product, value, self], {})
+            return self.call_method(tx, "copy_", [result], {})
         return None
 
     def method___setitem__(
@@ -1555,11 +1555,18 @@ class TensorVariable(VariableTracker):
         *,
         alpha: VariableTracker | None = None,
     ) -> VariableTracker | None:
-        if alpha is not None and config.enable_dynamo_decompositions:
-            result = variables.TorchInGraphFunctionVariable(torch.mul).call_function(
-                tx, [other, alpha], {}
-            )
-            return self.call_method(tx, "add_", [result], {})
+        # Tensor alpha: ATen would call .item() and fma internally.
+        # Use fma directly to avoid the item() graph break.
+        if (
+            alpha is not None
+            and isinstance(alpha, TensorVariable)
+            and config.enable_dynamo_decompositions
+        ):
+            from torch._inductor import inductor_prims
+
+            fma_var = variables.TorchInGraphFunctionVariable(inductor_prims.fma)
+            result = fma_var.call_function(tx, [other, alpha, self], {})
+            return self.call_method(tx, "copy_", [result], {})
         return None
 
     def method_addcdiv_(
@@ -1574,10 +1581,11 @@ class TensorVariable(VariableTracker):
             result = variables.TorchInGraphFunctionVariable(torch.div).call_function(
                 tx, [tensor1, tensor2], {}
             )
-            result = variables.TorchInGraphFunctionVariable(torch.mul).call_function(
-                tx, [result, value], {}
-            )
-            return self.call_method(tx, "add_", [result], {})
+            from torch._inductor import inductor_prims
+
+            fma_var = variables.TorchInGraphFunctionVariable(inductor_prims.fma)
+            fma_result = fma_var.call_function(tx, [result, value, self], {})
+            return self.call_method(tx, "copy_", [fma_result], {})
         return None
 
     def method___contains__(
@@ -1594,80 +1602,6 @@ class TensorVariable(VariableTracker):
             tx, [result], {}
         )
         return result.call_method(tx, "item", [], {})
-
-    def method_redistribute(
-        self,
-        tx: "InstructionTranslator",
-        *args: VariableTracker,
-        **kwargs: VariableTracker,
-    ) -> VariableTracker:
-        # rewrite non-primitive args/kwargs to be included in the on-the-fly prim function
-        # and rewrite args to have only proxyable args, then insert call_function
-        args_as_value = [x.as_python_constant() for x in args]
-        kwargs_as_value = {k: v.as_python_constant() for k, v in kwargs.items()}
-
-        def redistribute_fn_with_prim_types(x: Any) -> Any:
-            return x.redistribute(*args_as_value, **kwargs_as_value)
-
-        # attach the same function name for better debugging
-        redistribute_fn_with_prim_types.__name__ = "prim_redistribute"
-
-        from .builder import wrap_fx_proxy
-
-        return wrap_fx_proxy(
-            tx=tx,
-            proxy=tx.output.create_proxy(
-                "call_function",
-                redistribute_fn_with_prim_types,
-                *proxy_args_kwargs([self], {}),
-            ),
-        )
-
-    def method_to_local(
-        self,
-        tx: "InstructionTranslator",
-        *args: VariableTracker,
-        **kwargs: VariableTracker,
-    ) -> VariableTracker:
-        # rewrite non-primitive args/kwargs to be included in the on-the-fly prim function
-        # and rewrite args to have only proxyable args, then insert call_function
-
-        # custom grad_placements do not work with  as_python_constant,
-        # to support them we need to handle UserDefinedObject
-        def extract_python_value(vt: VariableTracker) -> Any:
-            if isinstance(vt, variables.UserDefinedObjectVariable):
-                return vt.value
-
-            return vt.as_python_constant()
-
-        grad_placements_vt = kwargs.get("grad_placements", CONSTANT_VARIABLE_NONE)
-        if isinstance(grad_placements_vt, variables.UserDefinedObjectVariable):
-            grad_placements_vt = VariableTracker.build(tx, tuple).call_function(
-                tx, [grad_placements_vt], {}
-            )
-
-        if kwargs.get("grad_placements") is not None:
-            kwargs["grad_placements"] = grad_placements_vt
-
-        args_as_value = [extract_python_value(x) for x in args]
-        kwargs_as_value = {k: extract_python_value(v) for k, v in kwargs.items()}
-
-        def to_local_fn_with_prim_types(x: Any) -> Any:
-            return x.to_local(*args_as_value, **kwargs_as_value)
-
-        # attach the same function name for better debugging
-        to_local_fn_with_prim_types.__name__ = "prim_to_local"
-
-        from .builder import wrap_fx_proxy
-
-        return wrap_fx_proxy(
-            tx=tx,
-            proxy=tx.output.create_proxy(
-                "call_function",
-                to_local_fn_with_prim_types,
-                *proxy_args_kwargs([self], {}),
-            ),
-        )
 
     def method_register_hook(
         self,
