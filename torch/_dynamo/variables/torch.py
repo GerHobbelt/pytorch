@@ -697,6 +697,10 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                 torch._dynamo.eval_frame._is_in_optimized_module,
             ):
                 tx.mark_inconsistent_side_effects()
+            # Read dynamically: the cached dict always has True, but
+            # is_exporting() should only be True during torch.export.
+            if self.value is torch.compiler.is_exporting:
+                return VariableTracker.build(tx, torch.compiler._is_exporting_flag)
             return VariableTracker.build(tx, tracing_state_functions()[self.value])
 
         @register(*dispatch_key_set_functions)
@@ -1354,26 +1358,8 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                 )
             return None
 
-        @register(torch.fx.experimental.symbolic_shapes.guarding_hint_or_throw)
-        def handle_guarding_hint_or_throw(
-            self,
-            tx: "InstructionTranslator",
-            expr: VariableTracker,
-        ) -> VariableTracker | None:
-            if isinstance(expr, SymNodeVariable):
-                return VariableTracker.build(
-                    tx,
-                    torch.fx.experimental.symbolic_shapes.guarding_hint_or_throw(
-                        expr.sym_num
-                    ),
-                )
-            elif expr.is_python_constant():
-                return expr
-            else:
-                return None
-
-        @register(torch.fx.experimental.symbolic_shapes.optimization_hint)
-        def handle_optimization_hint(
+        @register(torch.fx.experimental.symbolic_shapes.size_hint)
+        def handle_size_hint(
             self,
             tx: "InstructionTranslator",
             expr: VariableTracker,
@@ -1383,7 +1369,7 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
             if isinstance(expr, SymNodeVariable):
                 return VariableTracker.build(
                     tx,
-                    torch.fx.experimental.symbolic_shapes.optimization_hint(
+                    torch.fx.experimental.symbolic_shapes.size_hint(
                         expr.sym_num, fallback_int
                     ),
                 )
