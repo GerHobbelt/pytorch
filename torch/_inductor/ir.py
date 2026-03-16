@@ -5402,6 +5402,11 @@ class ChoiceCaller:
         # Use this to shuttle information between ChoieCaller generation
         # and the end of benchmarking
         self.annotations: dict[Any, Any] = {}
+        # Subclass-overridden attributes for subgraph-based choices
+        self.gm: torch.fx.GraphModule | None = None
+        self.decomposition: Callable[..., Any] | None = None
+        self.decomposition_kwargs: dict[str, Any] = {}
+        self.config_patches: dict[str, Any] = {}
 
     def benchmark(self, *args: Any, out: torch.Tensor) -> float:
         algo = self.to_callable()
@@ -8871,6 +8876,8 @@ class MultiOutput(ExternKernel):
 
         # Writes: build proper MemoryDep from our FixedLayout so the
         # scheduler can match our write with downstream epilogue reads.
+        # Normalize using the same policy as SchedulerNode so that the
+        # index expressions are directly comparable during fusion checks.
         name = self.get_name()
         indexer = self.get_layout().make_indexer()
 
@@ -8878,7 +8885,15 @@ class MultiOutput(ExternKernel):
             assert len(rindex) == 0
             return ops.store(name, indexer(index), "fake")
 
-        write_rw = dependencies.extract_read_writes(dummy, self.get_size(), ())
+        device = self.get_device()
+        should_normalize = (
+            not config.loop_ordering_after_fusion
+            or device is None
+            or not is_gpu(device.type)
+        )
+        write_rw = dependencies.extract_read_writes(
+            dummy, self.get_size(), (), normalize=should_normalize
+        )
         return dependencies.ReadWrites(
             reads=reads,
             writes=write_rw.writes,
