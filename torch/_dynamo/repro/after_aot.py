@@ -587,11 +587,8 @@ if "__compile_source__" in globals():
     )
 
     def get_fn_name(kernel: Any) -> str:
-        fn_name = (
-            # pyrefly: ignore [missing-attribute]
-            kernel._fn_name if isinstance(kernel, JITFunction) else kernel.fn._fn_name
-        )
-        return fn_name.split(".")[-1]
+        fn: Any = kernel if isinstance(kernel, JITFunction) else kernel.fn
+        return fn.__name__.split(".")[-1]
 
     def write_kernel_dependencies(
         kernel: Any,
@@ -694,6 +691,8 @@ if "__compile_source__" in globals():
             writer.const(placeholder)
         elif isinstance(arg, FakeScriptObject):
             writer.opaque(placeholder, arg.script_class_name)
+        elif isinstance(arg, torch._C.Generator):
+            writer.generator(placeholder, arg)
         else:
             writer.unsupported(placeholder, arg)
 

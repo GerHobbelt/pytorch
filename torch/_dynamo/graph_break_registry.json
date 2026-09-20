@@ -650,6 +650,16 @@
       "Hints": []
     }
   ],
+  "GB5195": [
+    {
+      "Gb_type": "elementwise_dtypes unsupported arg type",
+      "Context": "str(arg)",
+      "Explanation": "elementwise_dtypes requires tensor or constant arguments, got {type(arg).__name__}",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB0054": [
     {
       "Gb_type": "Failed to construct Enum variable",
@@ -686,6 +696,18 @@
       "Explanation": "Attempted to raise a non-Exception type/value.",
       "Hints": [
         "Your code may result in an error when running in eager. Please double check that your code doesn't contain a similar error when actually running eager/uncompiled. You can do this by removing the `torch.compile` call, or by using `torch.compiler.set_stance(\"force_eager\")`. "
+      ]
+    }
+  ],
+  "GB7299": [
+    {
+      "Gb_type": "_autograd_grad with lost grad_fn linkage",
+      "Context": "outputs lost autograd linkage during tracing",
+      "Explanation": "_autograd_grad() received tensors whose grad_fn was lost during tracing - this silently produces zero gradients.",
+      "Hints": [
+        "Compile the full transform instead of the returned ",
+        "closure: torch.compile(lambda x: torch.func.vjp(f, x))",
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
       ]
     }
   ],
@@ -2140,6 +2162,12 @@
     {
       "Gb_type": "Data-dependent branching",
       "Context": "attempted to jump with {value}",
+      "Explanation": "\"Detected data-dependent branching (e.g. `if my_tensor.sum() > 0:`). \"             \"Dynamo does not support tracing dynamic control flow.\" + trace_info",
+      "Hints": []
+    },
+    {
+      "Gb_type": "Data-dependent branching",
+      "Context": "attempted to jump with {value}",
       "Explanation": "Detected data-dependent branching (e.g. `if my_tensor.sum() > 0:`). Dynamo does not support tracing dynamic control flow.",
       "Hints": [
         "Use `torch.cond` to express dynamic control flow.",
@@ -2934,6 +2962,16 @@
       "Hints": [
         "Ensure the Tensor argument's shape, dtype, and device are correct.",
         "Your code may result in an error when running in eager. Please double check that your code doesn't contain a similar error when actually running eager/uncompiled. You can do this by removing the `torch.compile` call, or by using `torch.compiler.set_stance(\"force_eager\")`. "
+      ]
+    }
+  ],
+  "GB6025": [
+    {
+      "Gb_type": "Failed to trace list()",
+      "Context": "list({arg_types})",
+      "Explanation": "Dynamo does not know how to construct a list from argument types {arg_types}",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
       ]
     }
   ],
@@ -4174,6 +4212,16 @@
       ]
     }
   ],
+  "GB1140": [
+    {
+      "Gb_type": "_autograd_grad with unsupported argument type",
+      "Context": "got {type(var).__name__}",
+      "Explanation": "_autograd_grad() received an argument of type {type(var).__name__} which is not supported. Expected tensor or sequence of tensors.",
+      "Hints": [
+        "Ensure outputs and inputs arguments are tensors or sequences of tensors."
+      ]
+    }
+  ],
   "GB0325": [
     {
       "Gb_type": "torch.map: kwargs not supported",
@@ -4389,6 +4437,14 @@
     }
   ],
   "GB0345": [
+    {
+      "Gb_type": "strict_mode: improper args",
+      "Context": "args: {args}, kwargs: {kwargs}",
+      "Explanation": "strict_mode higher order op expects flat inputs (list/tuple/dict/set)",
+      "Hints": [
+        "Your code may result in an error when running in eager. Please double check that your code doesn't contain a similar error when actually running eager/uncompiled. You can do this by removing the `torch.compile` call, or by using `torch.compiler.set_stance(\"force_eager\")`. "
+      ]
+    },
     {
       "Gb_type": "strict_mode: improper args",
       "Context": "args: {args}, kwargs: {kwargs}",

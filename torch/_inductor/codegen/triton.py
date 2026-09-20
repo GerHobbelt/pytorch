@@ -6353,7 +6353,11 @@ class FusedUserDefinedTritonKernel(TritonKernel):
             )
             return result_var
         else:
-            return super().load(name, index)
+            # The scheduler should prevent this.
+            raise AssertionError(
+                f"Epilogue attempted to load from '{name}'. "
+                "Inductor indexing variables are not defined in user kernel scope. "
+            )
 
     def store(
         self, name: str, index: sympy.Expr, value: CSEVariable, mode: StoreMode = None
@@ -6376,9 +6380,13 @@ class FusedUserDefinedTritonKernel(TritonKernel):
 
         # Generate a new AST where the store value expr is replaced with the new value
         new_ast = copy.deepcopy(self.ir_node.kernel_ast)
-        from torch._higher_order_ops.triton_kernel_wrap import identify_triton_stores
+        from torch._higher_order_ops.triton_kernel_wrap import (
+            identify_triton_stores,
+            identify_triton_stores_from_ast,
+        )
 
-        kernel_stores = identify_triton_stores(new_ast)
+        # avoid redundant cache entry of new_ast
+        kernel_stores = identify_triton_stores_from_ast(new_ast)
         assert len(kernel_stores.stores) == 1
 
         new_store_value_node = ast.Name(self.new_store_cse_var.name)
@@ -6408,7 +6416,7 @@ class FusedUserDefinedTritonKernel(TritonKernel):
         src_lines = src_with_store_replaced.splitlines()
 
         # identify the store again, because the previous parse-modify-unparse could've change its location
-        kernel_stores = identify_triton_stores(ast.parse(src_with_store_replaced))
+        kernel_stores = identify_triton_stores(src_with_store_replaced)
         # python ast lineno is 1-indexed
         store_line_index = kernel_stores.stores[0].store_node.lineno - 1
 
@@ -6908,11 +6916,16 @@ def debug_triton_code(node: BaseSchedulerNode) -> list[str]:
         from torch._inductor.codegen.cuda_combined_scheduling import (
             CUDACombinedScheduling,
         )
+        from torch._inductor.codegen.xpu.xpu_combined_scheduling import (
+            XPUCombinedScheduling,
+        )
 
         device = node.get_device()
         assert device is not None
         backend = node.scheduler.get_backend(device)
-        assert isinstance(backend, (SIMDScheduling, CUDACombinedScheduling)), (
+        assert isinstance(
+            backend, (SIMDScheduling, CUDACombinedScheduling, XPUCombinedScheduling)
+        ), (
             f"Scheduling backend should be SIMD or CUDACombined when generating debug Triton strings, got: {type(backend)}"
         )
 

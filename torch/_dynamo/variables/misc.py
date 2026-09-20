@@ -15,6 +15,7 @@ Key classes include:
 - DebuggingVariable: Handles print and logging
 """
 
+import builtins
 import dataclasses
 import enum
 import functools
@@ -63,10 +64,8 @@ from ..utils import (
     identity,
     is_tensor_base_attr_getter,
     istype,
-    list_methods,
     proxy_args_kwargs,
     raise_args_mismatch,
-    tuple_methods,
 )
 from .base import AsPythonConstantNotImplementedError, NO_SUCH_SUBOBJ, VariableTracker
 from .constant import CONSTANT_VARIABLE_FALSE, CONSTANT_VARIABLE_NONE, ConstantVariable
@@ -103,6 +102,9 @@ class SuperVariable(VariableTracker):
         # to the current function where super() is called from (self for regular method,
         # cls for a classmethod)
         self.objvar = objvar
+
+    def python_type(self) -> type:
+        return builtins.super
 
     def reconstruct(self, codegen: "PyCodegen") -> None:
         codegen.add_push_null(lambda: codegen(variables.BuiltinVariable(super)))
@@ -192,7 +194,7 @@ class SuperVariable(VariableTracker):
         # not just AttrSource).
         value, source = self._resolved_getattr_and_source(tx, name)
         if not variables.ConstantVariable.is_literal(value):
-            return GetAttrVariable(self, name)
+            return GetAttrVariable(self, name, py_type=type(value))
         if source:
             install_guard(source.make_guard(GuardBuilder.CONSTANT_MATCH))
         return variables.ConstantVariable.create(value, source=source)
@@ -339,25 +341,12 @@ class SuperVariable(VariableTracker):
             )
             return variables.CONSTANT_VARIABLE_NONE
         elif (
-            isinstance(self.objvar, variables.UserDefinedDictVariable)
-            and inner_fn in self.objvar._dict_methods
+            isinstance(self.objvar, variables.UserDefinedObjectVariable)
+            and self.objvar._base_vt is not None
+            and self.objvar._base_methods is not None
+            and inner_fn in self.objvar._base_methods
         ):
-            return self.objvar._dict_vt.call_method(tx, name, args, kwargs)
-        elif (
-            isinstance(self.objvar, variables.UserDefinedSetVariable)
-            and inner_fn in self.objvar._set_methods
-        ):
-            return self.objvar._set_vt.call_method(tx, name, args, kwargs)
-        elif (
-            isinstance(self.objvar, variables.UserDefinedTupleVariable)
-            and inner_fn in tuple_methods
-        ):
-            return self.objvar._tuple_vt.call_method(tx, name, args, kwargs)
-        elif (
-            isinstance(self.objvar, variables.UserDefinedListVariable)
-            and inner_fn in list_methods
-        ):
-            return self.objvar._list_vt.call_method(tx, name, args, kwargs)
+            return self.objvar._base_vt.call_method(tx, name, args, kwargs)
         elif inner_fn is object.__getattribute__:
             # object.__getattribute__ has no side-effects. We can directly call
             # __getattribute__ to access the attribute.
@@ -838,6 +827,9 @@ class CellVariable(VariableTracker):
         super().__init__(**kwargs)
         self.pre_existing_contents = pre_existing_contents
 
+    def python_type(self) -> type:
+        return types.CellType
+
 
 class NewGlobalVariable(VariableTracker):
     def __init__(self, **kwargs: Any) -> None:
@@ -864,6 +856,9 @@ class AutogradFunctionVariable(VariableTracker):
     def __init__(self, fn_cls: Any, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.fn_cls = fn_cls
+
+    def python_type(self) -> type:
+        return type
 
     def call_apply(
         self,
@@ -1279,6 +1274,9 @@ class LambdaVariable(VariableTracker):
         super().__init__(**kwargs)
         self.fn = fn
 
+    def python_type(self) -> type:
+        return types.FunctionType
+
     def call_function(
         self,
         tx: "InstructionTranslator",
@@ -1605,7 +1603,9 @@ class TypingVariable(VariableTracker):
         from .builder import SourcelessBuilder, VariableBuilder
 
         if name in cmp_name_to_op_mapping:
-            return variables.GetAttrVariable(self, name)
+            return variables.GetAttrVariable(
+                self, name, py_type=type(getattr(self.value, name))
+            )
 
         if tx.output.side_effects.has_pending_mutation_of_attr(self, name):
             return tx.output.side_effects.load_attr(self, name)
@@ -1892,6 +1892,9 @@ class StringFormatVariable(VariableTracker):
 
     _nonvar_fields = {"format_string", *VariableTracker._nonvar_fields}
 
+    def python_type(self) -> type:
+        return str
+
     @classmethod
     def create(
         cls,
@@ -1991,6 +1994,9 @@ class DebuggingVariable(VariableTracker):
         super().__init__(**kwargs)
         self.value = value
 
+    def python_type(self) -> type:
+        return type(self.value)
+
     @staticmethod
     def is_reorderable_logging_function(
         obj: Any,
@@ -2059,6 +2065,9 @@ class IgnoredFunctionVariable(VariableTracker):
         super().__init__(**kwargs)
         self.value = value
 
+    def python_type(self) -> type:
+        return type(self.value)
+
     def get_real_python_backed_value(self) -> Any:
         return self.value
 
@@ -2079,6 +2088,9 @@ class LoggingLoggerVariable(VariableTracker):
     def __init__(self, value: logging.Logger, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.value = value
+
+    def python_type(self) -> type:
+        return type(self.value)
 
     def get_real_python_backed_value(self) -> logging.Logger:
         return self.value
@@ -2196,7 +2208,7 @@ class ConstantLikeVariable(VariableTracker):
             return NumpyVariable(result)
         if variables.ConstantVariable.is_literal(result):
             return VariableTracker.build(tx, result)
-        return GetAttrVariable(self, name)
+        return GetAttrVariable(self, name, py_type=type(result))
 
 
 class TorchVersionVariable(ConstantLikeVariable):
@@ -2230,6 +2242,9 @@ class RandomClassVariable(VariableTracker):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+
+    def python_type(self) -> type:
+        return type
 
     def call_function(
         self,
@@ -2402,6 +2417,9 @@ class RandomVariable(VariableTracker):
 
 
 class WeakRefVariable(VariableTracker):
+    def python_type(self) -> type:
+        return weakref.ref
+
     @staticmethod
     # pyrefly: ignore [bad-override, bad-param-name-override]
     def build(

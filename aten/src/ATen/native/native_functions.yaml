@@ -2947,6 +2947,8 @@
   autogen: _grid_sampler_2d_cpu_fallback.out
 
 - func: _grid_sampler_2d_cpu_fallback_backward(Tensor grad_output, Tensor input, Tensor grid, int interpolation_mode, int padding_mode, bool align_corners) -> (Tensor, Tensor)
+  dispatch:
+    CompositeExplicitAutograd: _grid_sampler_2d_cpu_fallback_backward
 
 - func: grid_sampler_3d(Tensor input, Tensor grid, int interpolation_mode, int padding_mode, bool align_corners) -> Tensor
   dispatch:
@@ -4455,7 +4457,7 @@
 
 - func: mvlgamma.out(Tensor self, int p, *, Tensor(a!) out) -> Tensor(a!)
   dispatch:
-    CPU, CUDA: mvlgamma_out
+    CPU, CUDA, MPS: mvlgamma_out
   tags: pointwise
 
 - func: mvlgamma(Tensor self, int p) -> Tensor
@@ -9626,12 +9628,14 @@
   dispatch:
     CPU: nonzero_static_out_cpu
     CUDA: nonzero_static_out_cuda
+    MPS: nonzero_static_out_mps
 
 - func: nonzero_static(Tensor self, *, SymInt size, int fill_value=-1) -> Tensor
   variants: method, function
   dispatch:
     CPU: nonzero_static_cpu
     CUDA: nonzero_static_cuda
+    MPS: nonzero_static_mps
 
 - func: nonzero_numpy(Tensor self) -> Tensor[]
   variants: method, function
@@ -15272,7 +15276,7 @@
   variants: function
   tags: nondeterministic_seeded
 
-- func: _scaled_dot_product_attention_math_for_mps(Tensor query, Tensor key, Tensor value, Tensor? attn_mask=None, float dropout_p=0.0, bool is_causal=False, Tensor? dropout_mask=None, *, float? scale=None) -> (Tensor, Tensor)
+- func: _scaled_dot_product_attention_math_for_mps(Tensor query, Tensor key, Tensor value, Tensor? attn_mask=None, float dropout_p=0.0, bool is_causal=False, Tensor? dropout_mask=None, *, float? scale=None, bool enable_gqa=False) -> (Tensor, Tensor)
   dispatch:
     MPS: _scaled_dot_product_attention_math_mps
   tags: nondeterministic_seeded
