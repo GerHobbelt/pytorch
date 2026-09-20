@@ -453,7 +453,7 @@ test_python_smoke_b200() {
 
 test_python_smoke_xpu() {
   # Smoke tests for XPU client
-  time python test/run_test.py --include test_transformers $PYTHON_TEST_EXTRA_OPTION
+  time python test/run_test.py --include test_transformers test_xpu $PYTHON_TEST_EXTRA_OPTION
   # Temporary disable sycl-tla backend test for XPU since it's not stable yet. We will re-enable it once the stability is improved.
   # time test_xpu_sycl_tla_backend
   assert_git_not_dirty
@@ -1487,15 +1487,12 @@ test_libtorch_jit() {
   python cpp/jit/tests_setup.py setup
   popd
 
-  # Run jit and lazy tensor cpp tests one at a time; running them concurrently
-  # has been observed to hang pytest-xdist worker teardown on some runners.
+  # Run jit and lazy tensor cpp tests together to finish them faster
   if [[ "$BUILD_ENVIRONMENT" == *cuda* && "$TEST_CONFIG" != *nogpu* ]]; then
-    LTC_TS_CUDA=1 python test/run_test.py --cpp --verbose -i cpp/test_jit
-    LTC_TS_CUDA=1 python test/run_test.py --cpp --verbose -i cpp/test_lazy
+    LTC_TS_CUDA=1 python test/run_test.py --cpp --verbose -i cpp/test_jit cpp/test_lazy
   else
     # CUDA tests have already been skipped when CUDA is not available
-    python test/run_test.py --cpp --verbose -i cpp/test_jit -k "not CUDA"
-    python test/run_test.py --cpp --verbose -i cpp/test_lazy -k "not CUDA"
+    python test/run_test.py --cpp --verbose -i cpp/test_jit cpp/test_lazy -k "not CUDA"
   fi
 
   # Cleaning up test artifacts in the test folder
