@@ -6131,7 +6131,6 @@ class TestLinalg(TestCase):
     @onlyCUDA
     @skipCUDAIfNotRocm
     # Fails with triton 3.7
-    @skipIfRocmArch(NAVI_ARCH)
     @dtypes(torch.float)
     def test_mm_submatrix_offline_tunableop(self, device, dtype):
         import os
@@ -6262,8 +6261,12 @@ class TestLinalg(TestCase):
             # This stores total number of cumulative results
             total_num_results = new_results - ref_results
 
-            # There must be a new tuning results
-            self.assertEqual(total_num_results, 10)
+            preferred_blas = str(torch.backends.cuda.preferred_blas_library())
+            # With hipBLASLt preferred, the two linear/addmm+bias calls are
+            # tracked as GemmAndBias tunables (+2). With rocBLAS preferred,
+            # they fall back to regular GEMM signatures and don't add entries.
+            expected_num_results = 10 if preferred_blas == "_BlasBackend.Cublaslt" else 8
+            self.assertEqual(total_num_results, expected_num_results)
 
             results_filename = torch.cuda.tunable.get_filename()
             self.assertTrue(os.path.exists(results_filename))

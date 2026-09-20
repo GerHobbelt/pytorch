@@ -27,9 +27,9 @@ from torch._functorch.aot_autograd import (
     aot_export_module,
 )
 from torch._inductor import config as inductor_config
-from torch._inductor.compile_fx import compile_fx
+from torch._inductor.compile_fx import compile_fx, compile_fx_inner
 from torch._inductor.test_case import run_tests, TestCase
-from torch._inductor.utils import fresh_inductor_cache
+from torch._inductor.utils import fresh_inductor_cache, run_and_get_code
 from torch._library.effects import EffectType
 from torch._library.fake_class_registry import FakeScriptObject, maybe_to_fake_obj
 from torch._library.opaque_object import (
@@ -50,6 +50,7 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
+from torch.testing._internal.inductor_utils import HAS_GPU
 
 
 class Color(OpaqueBase):
@@ -1032,6 +1033,113 @@ def forward(self, x_1, cfg_1):
     return process_with_config
     """,  # noqa: B950
         )
+
+    def test_subclass_opaque_output_reuses_input_proxy(self):
+        # Regression test: when a tensor subclass's __torch_dispatch__ wraps
+        # the output with the real OpaqueBase (not the FakeScriptObject proxy),
+        # the AOTAutograd forward graph should still reference the opaque via
+        # its input placeholder — not create a duplicate get_attr constant.
+        #
+        # This mirrors DTensor where C++ dispatch creates new DTensors storing
+        # the real DeviceMesh, so output flattening calls maybe_to_fake_obj
+        # and mints a fresh FakeScriptObject for the same underlying object.
+
+        class TensorWithRealCounter(torch.Tensor):
+            @staticmethod
+            def __new__(cls, data, counter):
+                return torch.Tensor._make_wrapper_subclass(
+                    cls,
+                    data.size(),
+                    strides=data.stride(),
+                    storage_offset=data.storage_offset(),
+                    device=data.device,
+                    dtype=data.dtype,
+                    layout=data.layout,
+                    requires_grad=data.requires_grad,
+                )
+
+            def __init__(self, data, counter):
+                self._data = data
+                self._counter = counter
+
+            def __repr__(self):
+                return "TensorWithRealCounter(...)"
+
+            def __tensor_flatten__(self):
+                return ["_data", "_counter"], ()
+
+            @staticmethod
+            def __tensor_unflatten__(inner_tensors, ctx, outer_size, outer_stride):
+                return TensorWithRealCounter(
+                    inner_tensors["_data"], inner_tensors["_counter"]
+                )
+
+            @classmethod
+            def __torch_dispatch__(cls, func, types, args, kwargs):
+                if kwargs is None:
+                    kwargs = {}
+
+                counter = None
+                for arg in torch.utils._pytree.tree_leaves(args):
+                    if isinstance(arg, TensorWithRealCounter):
+                        counter = arg._counter
+                        break
+
+                def unwrap(x):
+                    return x._data if isinstance(x, TensorWithRealCounter) else x
+
+                out = func(
+                    *torch.utils._pytree.tree_map(unwrap, args),
+                    **torch.utils._pytree.tree_map(unwrap, kwargs),
+                )
+
+                # Unwrap FakeScriptObject to real OpaqueBase, simulating what
+                # happens in DTensor's C++ dispatch path.
+                real_counter = counter
+                if isinstance(counter, FakeScriptObject):
+                    real_counter = counter.real_obj
+
+                return torch.utils._pytree.tree_map(
+                    lambda x: TensorWithRealCounter(x, real_counter)
+                    if isinstance(x, torch.Tensor)
+                    else x,
+                    out,
+                )
+
+        counter = Counter(start=0, end=10)
+        x = TensorWithRealCounter(torch.randn(4), counter)
+
+        backend = AotEagerAndRecordGraphs()
+        torch.compile(lambda x: x + 1, fullgraph=True, backend=backend)(x)
+
+        fw = backend.fw_graphs[0]
+        get_attr_nodes = [n for n in fw.graph.nodes if n.op == "get_attr"]
+        self.assertEqual(
+            get_attr_nodes,
+            [],
+            "Opaque output should reuse the input placeholder, not create a get_attr constant",
+        )
+
+    def test_guard_pickle_subclass_with_opaque_inner_attr(self):
+        # Regression test: the guard state pickler serializes tensor subclasses
+        # by iterating over __tensor_flatten__ inner attrs.  Opaque inner attrs
+        # (e.g. Counter) must be handled correctly — they are pickled by the
+        # normal pickle machinery alongside tensor inner attrs.
+        from torch._dynamo.guards import GuardsStatePickler
+
+        a = torch.randn(4)
+        b = torch.randn(4)
+        counter = Counter(start=0, end=10)
+        size = SizeStore(4)
+        x = TensorWithCounter(a, b, counter, size)
+
+        import io
+
+        buf = io.BytesIO()
+        pickler = GuardsStatePickler({id(x): x}, {}, {}, buf)
+        func, args = pickler.reducer_override(x)
+        obj = func(*args)
+        self.assertIsInstance(obj, torch.Tensor)
 
     @parametrize("make_fx_tracing_mode", ["fake", "symbolic"])
     def test_bad_fake(self, make_fx_tracing_mode):
@@ -2174,6 +2282,48 @@ class GraphModule(torch.nn.Module):
         self.assertIs(x2.grad._counter, counter2)
         self.assertEqual(x2.grad._size_store, size2)
 
+    def test_tangent_primal_proxy_collision_for_opaque_inner_attr(self):
+        """Regression test for tangent/primal proxy collision.
+
+        When a tensor subclass has an opaque inner attr, joint graph tracing
+        creates separate FakeScriptObject wrappers for the primal and tangent
+        that share the same underlying real object.  set_proxy_slot must map
+        the tangent wrapper to the *primal* proxy so that forward outputs
+        don't spuriously depend on tangent placeholders (which would crash the
+        partitioner with 'Node tangents_N was invalid, but is output').
+        """
+        from torch._library.fake_class_registry import FakeScriptObject
+        from torch.fx.experimental.proxy_tensor import (
+            _GraphAppendingTracerEx,
+            set_proxy_slot,
+        )
+
+        counter = Counter(start=3, end=10)
+        fso_primal = FakeScriptObject(counter, "Counter", counter)
+        fso_tangent = FakeScriptObject(counter, "Counter", counter)
+        # Sanity: different wrappers, same real_obj
+        self.assertIsNot(fso_primal, fso_tangent)
+        self.assertIs(
+            object.__getattribute__(fso_primal, "real_obj"),
+            object.__getattribute__(fso_tangent, "real_obj"),
+        )
+
+        graph = torch.fx.Graph()
+        tracer = _GraphAppendingTracerEx(graph)
+
+        primal_node = graph.placeholder("primals_1")
+        tangent_node = graph.placeholder("tangents_1")
+        primal_proxy = torch.fx.Proxy(primal_node, tracer)
+        tangent_proxy = torch.fx.Proxy(tangent_node, tracer)
+
+        # Register primal first, then tangent (mirrors joint graph tracing)
+        set_proxy_slot(fso_primal, tracer, primal_proxy)
+        set_proxy_slot(fso_tangent, tracer, tangent_proxy)
+
+        # Both wrappers should resolve to the primal proxy
+        self.assertIs(tracer.opaque_tracker[fso_primal].node, primal_node)
+        self.assertIs(tracer.opaque_tracker[fso_tangent].node, primal_node)
+
     def test_opaque_produced_by_call_function_saved_for_backward(self):
         """Test that an opaque object produced by a call_function node
         (not a placeholder) is correctly saved for backward.
@@ -3229,6 +3379,68 @@ def forward(self, p_linear_weight, p_linear_bias, obj_lifted_custom_0, x):
         self.assertEqual(res2, f(x, "square"))
         self.assertEqual(cnt.frame_count, 1)
 
+    def test_opaque_multi_output_not_tensor_irnode(self):
+        """OpaqueMultiOutput must not be classified as a tensor IR node.
+
+        _is_tensor_irnode is used to select nodes for stride constraint
+        functions (require_stride1, require_contiguous, etc). If
+        OpaqueMultiOutput passes the check, those functions would call
+        get_stride/get_dtype/make_loader on it and crash."""
+        from unittest.mock import MagicMock
+
+        from torch._inductor import ir
+        from torch._inductor.lowering import _is_tensor_irnode
+
+        opaque_multi = ir.OpaqueMultiOutput.__new__(ir.OpaqueMultiOutput)
+        self.assertIsInstance(opaque_multi, ir.IRNode)
+        self.assertFalse(_is_tensor_irnode(opaque_multi))
+
+        non_tensor = MagicMock(spec=ir.NonTensorObj)
+        non_tensor.__class__ = ir.NonTensorObj
+        self.assertFalse(_is_tensor_irnode(non_tensor))
+
+        self.assertFalse(_is_tensor_irnode(42))
+
+    @unittest.skipIf(not dist.is_available(), "requires distributed")
+    def test_fake_script_object_process_group_pybind(self):
+        """FakeScriptObject wrapping ProcessGroup must be unwrapped in the
+        pybind toIValue before casting to c10::intrusive_ptr<ProcessGroup>.
+
+        During Dynamo tracing with CooR, mesh_get_process_group returns a
+        FakeScriptObject-wrapped ProcessGroup. When that flows into a C++
+        custom op, toIValue needs to unwrap real_obj before the pybind
+        cast. This test exercises that path by calling
+        mesh_get_process_group (which returns a wrapped PG during tracing)
+        and passing it to another op that consumes the ProcessGroup."""
+        from torch.distributed.device_mesh import (
+            _register_distributed_opaque_types,
+            DeviceMesh,
+        )
+        from torch.testing._internal.distributed.fake_pg import FakeStore
+
+        already_initialized = dist.is_initialized()
+        if already_initialized:
+            dist.destroy_process_group()
+
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
+        try:
+            _register_distributed_opaque_types()
+            mesh = DeviceMesh("cpu", torch.arange(2))
+
+            def f(mesh, x):
+                pg = torch.ops._dtensor.mesh_get_process_group(mesh, 0)
+                return x + pg.size()
+
+            x = torch.randn(4)
+            compiled_f = torch.compile(f, backend="aot_eager", fullgraph=True)
+            result = compiled_f(mesh, x)
+            expected = f(mesh, x)
+            self.assertEqual(result, expected)
+        finally:
+            dist.destroy_process_group()
+            if already_initialized:
+                dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
+
     def test_subclass_parametrization_with_opaque_attrs(self):
         """unwrap_tensor_subclass_parameters should handle non-tensor attrs."""
         from torch._functorch._aot_autograd.subclass_parametrization import (
@@ -3388,6 +3600,82 @@ def forward(self, p_linear_weight, p_linear_bias, obj_lifted_custom_0, x):
         opt_fn = torch.compile(fn, fullgraph=True, backend="aot_eager_decomp_partition")
         res = opt_fn(x)
         self.assertEqual(ref, res)
+
+    def test_reference_type_opaque_object_state(self):
+        """When compile_fx_inner receives an FX graph whose placeholder meta['val']
+        is a raw opaque reference type (not wrapped in FakeScriptObject), inductor
+        handles it via OpaqueObjectState. This codepath is used by compile-on-one-rank
+        (COOR) where the FX graph is constructed with real objects."""
+        m = OpaqueMultiplier(2.0)
+        x = torch.ones(3)
+
+        graph = torch.fx.Graph()
+        m_node = graph.placeholder("m")
+        m_node.meta["val"] = m
+        fake_mode = FakeTensorMode()
+        x_node = graph.placeholder("x")
+        x_node.meta["val"] = fake_mode.from_tensor(x)
+        out = graph.call_function(
+            torch.ops._TestOpaqueObject.mul_with_scale.default, (m_node, x_node)
+        )
+        out.meta["val"] = fake_mode.from_tensor(x)
+        graph.output((out,))
+
+        gm = torch.fx.GraphModule({}, graph)
+        compiled = compile_fx_inner(gm, [m, x])
+        result = compiled([m, x])
+        self.assertEqual(result, (x * 2,))
+
+    @unittest.skipIf(not HAS_GPU, "Inductor+gpu needs triton and recent GPU arch")
+    def test_benchmark_harness_no_pickle_for_opaque_inputs(self):
+        """Opaque graph inputs must not be pickled in the benchmark harness."""
+        a = torch.randn(4, 4, device="cuda")
+        b = torch.randn(4, 4, device="cuda")
+        twc = TensorWithCounter(a, b, Counter(0, 10), SizeStore(4))
+
+        def fn(x):
+            return x + 1
+
+        compiled_fn = torch.compile(fn, backend="inductor", fullgraph=True)
+        _, codes = run_and_get_code(compiled_fn, twc)
+        self.assertGreater(len(codes), 0)
+        for code in codes:
+            self.assertNotIn("pickle", code)
+
+    def test_opaque_object_state_in_graph_output(self):
+        """When compile_fx_inner receives a graph where a raw opaque reference
+        type appears in the outputs (not just inputs), inductor must handle it.
+        This happens in CooR (compile-on-one-rank) precompile: aot_autograd
+        partitions the joint graph so the forward graph saves opaque objects
+        (e.g. DeviceMesh) for the backward graph by including them in forward
+        outputs.  Inductor must:
+          1. Accept OpaqueObjectState in the output type assertion
+             (GraphLowering.output).
+          2. Handle NonTensorObj graph inputs in the memory planner
+             (get_dep_size_hint) without calling get_numel/get_dtype on them."""
+        m = OpaqueMultiplier(2.0)
+        x = torch.ones(3)
+
+        graph = torch.fx.Graph()
+        m_node = graph.placeholder("m")
+        m_node.meta["val"] = m
+        fake_mode = FakeTensorMode()
+        x_node = graph.placeholder("x")
+        x_node.meta["val"] = fake_mode.from_tensor(x)
+        out = graph.call_function(
+            torch.ops._TestOpaqueObject.mul_with_scale.default, (m_node, x_node)
+        )
+        out.meta["val"] = fake_mode.from_tensor(x)
+        # Include the opaque object in the output tuple, simulating how
+        # aot_autograd's forward graph passes saved-for-backward objects
+        # through as outputs.
+        graph.output((out, m_node))
+
+        gm = torch.fx.GraphModule({}, graph)
+        compiled = compile_fx_inner(gm, [m, x])
+        result = compiled([m, x])
+        self.assertEqual(result[0], x * 2)
+        self.assertIs(result[1], m)
 
 
 instantiate_parametrized_tests(TestOpaqueObject)

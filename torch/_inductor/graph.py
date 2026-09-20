@@ -24,7 +24,11 @@ from torch import device, Tensor
 from torch._decomp import get_decompositions
 from torch._dynamo.utils import defake, dynamo_timed
 from torch._library.fake_class_registry import FakeScriptObject
-from torch._library.opaque_object import is_opaque_type, is_opaque_value_type
+from torch._library.opaque_object import (
+    is_opaque_reference_type,
+    is_opaque_type,
+    is_opaque_value_type,
+)
 from torch._library.utils import get_layout_constraint_tag
 from torch._logging import LazyString, trace_structured
 from torch._prims_common import (
@@ -659,6 +663,12 @@ class GraphLowering(torch.fx.Interpreter):
         """
         if (dep, count_bytes) not in self.dep_size_hint_cache:
             res = 0
+            # Non-tensor graph inputs (TorchBindObject, OpaqueObjectState)
+            # have no meaningful size — skip the size computation entirely.
+            inp = self.graph_inputs.get(dep.name)
+            if isinstance(inp, ir.NonTensorObj):
+                self.dep_size_hint_cache[(dep, count_bytes)] = 0
+                return 0
             try:
                 if (
                     not dep.has_unbacked_symbols()
@@ -1244,6 +1254,11 @@ class GraphLowering(torch.fx.Interpreter):
             self.graph_inputs[target] = gen  # type: ignore[assignment]
             self.graph_input_names.append(target)
             return gen
+        elif is_opaque_reference_type(type(example)):
+            opaque_obj = ir.OpaqueObjectState(name=target, value=example)
+            self.graph_inputs[target] = opaque_obj  # type: ignore[assignment]
+            self.graph_input_names.append(target)
+            return opaque_obj
 
         assert isinstance(example, torch.Tensor), example
         # todo(chilli): We can remove the last check once we turn buffers into
@@ -1508,7 +1523,7 @@ class GraphLowering(torch.fx.Interpreter):
                     value=value.item(), dtype=value.dtype, device=value.device
                 )
             if self.can_inline_constant(value):
-                log.debug("Inlining constant: %s ", str(target))
+                log.debug("Inlining constant: %s ", target)
                 # tensor lowering has constant inlining logic
                 from .lowering import tensor
 
@@ -1522,11 +1537,11 @@ class GraphLowering(torch.fx.Interpreter):
     def call_method(self, target: Any, args: Any, kwargs: Any) -> NoReturn:
         raise AssertionError
 
-    # pyrefly: ignore [bad-override]
+    @typing_extensions.override
     def output(
         self,
-        target: str,  # type: ignore[override]
-        args: tuple[object],  # type: ignore[override]
+        target: torch.fx.node.Target,
+        args: tuple[torch.fx.node.Argument, ...],
         kwargs: dict[str, object],
     ) -> None:
         result = super().output(target, args, kwargs)  # type: ignore[arg-type]
@@ -1554,6 +1569,7 @@ class GraphLowering(torch.fx.Interpreter):
                     TorchBindObject,
                     ir.OpaqueMultiOutput,
                     ir.OpaqueValueTypeConstant,
+                    ir.OpaqueObjectState,
                 ),
             )
             for x in result
@@ -1592,13 +1608,19 @@ class GraphLowering(torch.fx.Interpreter):
         self.graph_outputs = result_correct_strides
         value: ir.IRNode
         for name, value in self.graph_inputs.items():
-            if isinstance(value, TorchBindObject):
+            if isinstance(
+                value,
+                (
+                    TorchBindObject,
+                    sympy.Expr,
+                    torch._inductor.ir.GeneratorState,
+                    torch._inductor.ir.OpaqueObjectState,
+                ),
+            ):
                 continue
-            assert isinstance(
-                value, (TensorBox, sympy.Expr, torch._inductor.ir.GeneratorState)
-            ), f"Unsupported inductor graph input type: {type(value)}"
-            if not isinstance(value, TensorBox):
-                continue
+            assert isinstance(value, TensorBox), (
+                f"Unsupported inductor graph input type: {type(value)}"
+            )
             value.realize()
             assert isinstance(value, TensorBox)
             value = value.data
@@ -2160,6 +2182,8 @@ class GraphLowering(torch.fx.Interpreter):
     def create_deferred_runtime_asserts(
         self, n: torch.fx.Node, new_unbacked_defs: OrderedSet[sympy.Symbol]
     ) -> None:
+        if config.do_not_emit_runtime_assertions:
+            return
         # [NOTE] Codegen runtime asserts in Inductor
         #
         # We need to generate runtime asserts directly in Inductor instead
