@@ -4,7 +4,6 @@ import functools
 import unittest
 
 import torch
-import torch._dynamo.config
 import torch.utils._pytree as pytree
 from functorch.experimental import control_flow
 from functorch.experimental.control_flow import cond
@@ -2045,7 +2044,6 @@ def forward(self, pred_1, x_1):
         self.assertTrue("c" in res)
         self.assertEqual(expected, res)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_map_autograd_simple(self):
         def f(x, y):
             return x.sin().cos() * y.cos().sin()
@@ -2060,7 +2058,6 @@ def forward(self, pred_1, x_1):
         self.assertEqual(expected_res, res)
         self.assertEqual(expected_grads, grads)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_map_autograd_simple_partial_grad(self):
         def f(x, y):
             return x.sin().cos() * y.cos().sin()
@@ -2076,7 +2073,6 @@ def forward(self, pred_1, x_1):
         self.assertEqual(expected_res, res)
         self.assertEqual(expected_grads, grads)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_map_autograd_no_grad_output(self):
         def f(x, y):
             return x[0].sin().cos() + y, y.cos().sin()
@@ -2092,7 +2088,6 @@ def forward(self, pred_1, x_1):
         self.assertEqual(expected_res, res)
         self.assertEqual(expected_grads, grads)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_map_autograd_nested_list(self):
         import torch.utils._pytree as pytree
 
@@ -2122,7 +2117,6 @@ def forward(self, pred_1, x_1):
         fake_outs = fwbw(_fake_map, f, x, y)
         self.assertEqual(true_outs, fake_outs)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_map_autograd_higher_order(self):
         from torch.autograd.functional import hessian as hes, jacobian as jac
 
@@ -7922,7 +7916,6 @@ def forward(self, arg0_1):
         self.assertEqual(res, g(x, y, z))
         self.check_map_count(gm, 1)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_tracing_map_autograd_symbolic_simple(self):
         def f(x, y):
             return x + y
@@ -7940,7 +7933,6 @@ def forward(self, arg0_1):
         self.assertEqual(res, g(x, y))
         self.check_map_count(gm, 2)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_tracing_map_autograd_symbolic_list(self):
         import torch.utils._pytree as pytree
 
@@ -7966,7 +7958,6 @@ def forward(self, arg0_1):
         self.assertEqual(res, g(x, y))
         self.check_map_count(gm, 2)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_tracing_map_autograd_symbolic_dict(self):
         def f(x, y):
             return [x["a"] + y, x["b"] * y]
@@ -7996,7 +7987,6 @@ def forward(self, arg0_1):
         self.assertEqual(res, g(x, y))
         self.check_map_count(gm, 2)
 
-    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_tracing_map_autograd_aot_functionalized(self):
         def inner(x, y):
             z = x - 1
@@ -10043,6 +10033,7 @@ class GraphModule(torch.nn.Module):
         while_loop_stack_output = torch.ops.higher_order.while_loop_stack_output(while_loop_cond_graph_0, while_loop_body_graph_0, (primals_1,), (primals_3, primals_2));  while_loop_cond_graph_0 = while_loop_body_graph_0 = None
         getitem: "f32[u2, 3, 3]" = while_loop_stack_output[0];  while_loop_stack_output = None
         select: "f32[3, 3]" = torch.ops.aten.select.int(getitem, 0, -1)
+
         unsqueeze: "f32[1, 3, 3]" = torch.ops.aten.unsqueeze.default(primals_1, 0);  primals_1 = None
         slice_1: "f32[u2 - 1, 3, 3]" = torch.ops.aten.slice.Tensor(getitem, 0, 0, -1);  getitem = None
         cat: "f32[u2, 3, 3]" = torch.ops.aten.cat.default([unsqueeze, slice_1]);  unsqueeze = slice_1 = None
@@ -11559,6 +11550,131 @@ class TestHopSchema(TestCase):
         self.assertExpectedInline(
             str(schema),
             """cond(SymBool pred, Any true_fn, Any false_fn, Tensor operand0) -> ((Tensor))""",
+        )
+
+    def test_switch_gen_schema_tensor_inputs(self):
+        schema = torch.ops.higher_order.switch.gen_schema(
+            torch.tensor(0),
+            (lambda x: x.sin(), lambda x: x.cos(), lambda x: x.tan()),
+            (torch.randn(3, 4),),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(Tensor index, Any branch0_fn, Any branch1_fn, Any branch2_fn, Tensor operand0) -> ((Tensor))""",
+        )
+
+    def test_switch_gen_schema_symint_inputs(self):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+        with fake_mode, fake_mode.shape_env.ignore_fresh_unbacked_symbols():
+            sym_int = torch.randn(3, 4).nonzero().size(0)
+
+        schema = torch.ops.higher_order.switch.gen_schema(
+            sym_int,
+            (lambda x: x.sin(), lambda x: x.cos()),
+            (torch.randn(3, 4),),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(SymInt index, Any branch0_fn, Any branch1_fn, Tensor operand0) -> ((Tensor))""",
+        )
+
+    def test_switch_gen_schema_multiple_operands(self):
+        schema = torch.ops.higher_order.switch.gen_schema(
+            torch.tensor(1),
+            (lambda x, y: (x + y, x * y), lambda x, y: (x - y, x / y)),
+            (torch.randn(3, 4), torch.randn(3, 4)),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(Tensor index, Any branch0_fn, Any branch1_fn, Tensor operand0, Tensor operand1) -> (Tensor, Tensor)""",
+        )
+
+    def test_switch_gen_schema_with_input_mutation(self):
+        def branch0(x, y):
+            x.add_(1)
+            return x + y
+
+        def branch1(x, y):
+            return x - y
+
+        schema = torch.ops.higher_order.switch.gen_schema(
+            torch.tensor(0),
+            (branch0, branch1),
+            (torch.randn(3, 4), torch.randn(3, 4)),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(Tensor index, Any branch0_fn, Any branch1_fn, Tensor(a3!) operand0, Tensor operand1) -> ((Tensor))""",
+        )
+
+    def test_switch_gen_schema_with_disjoint_branch_mutation(self):
+        def branch0(x, y):
+            x.add_(1)
+            return x + y
+
+        def branch1(x, y):
+            y.sub_(1)
+            return x - y
+
+        schema = torch.ops.higher_order.switch.gen_schema(
+            torch.tensor(0),
+            (branch0, branch1),
+            (torch.randn(3, 4), torch.randn(3, 4)),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(Tensor index, Any branch0_fn, Any branch1_fn, Tensor(a3!) operand0, Tensor(a4!) operand1) -> ((Tensor))""",
+        )
+
+    def test_switch_gen_schema_int_index(self):
+        schema = torch.ops.higher_order.switch.gen_schema(
+            0,
+            (lambda x: x.sin(), lambda x: x.cos()),
+            (torch.randn(3, 4),),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(int index, Any branch0_fn, Any branch1_fn, Tensor operand0) -> ((Tensor))""",
+        )
+
+    def test_switch_gen_schema_differing_int_symint_outputs(self):
+        def branch0(x):
+            return x.sin(), 5
+
+        def branch1(x):
+            return x.cos(), 7
+
+        def branch2(x):
+            return x.tan(), 9
+
+        schema = torch.ops.higher_order.switch.gen_schema(
+            torch.tensor(0),
+            (branch0, branch1, branch2),
+            (torch.randn(3, 4),),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(Tensor index, Any branch0_fn, Any branch1_fn, Any branch2_fn, Tensor operand0) -> (Tensor, SymInt)""",
+        )
+
+    def test_switch_gen_schema_matching_int_int_outputs(self):
+        def branch0(x):
+            return x.sin(), 5
+
+        def branch1(x):
+            return x.cos(), 5
+
+        schema = torch.ops.higher_order.switch.gen_schema(
+            torch.tensor(0),
+            (branch0, branch1),
+            (torch.randn(3, 4),),
+        )
+        self.assertExpectedInline(
+            str(schema),
+            """switch(Tensor index, Any branch0_fn, Any branch1_fn, Tensor operand0) -> (Tensor, int)""",
         )
 
     def test_while_loop_gen_schema_tensor_inputs(self):
