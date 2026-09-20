@@ -1805,7 +1805,7 @@ class DistributeWithStridedShardTest(DTensorContinuousTestBase):
             elif idx == 3:
                 self.assertExpectedInline(
                     trace_str,
-                    """S(0)[0]S(0)[1]R->S(0)RR->S(0)_S(1, 5)R->R_S(1, 5)R->R_S(1, 5)S(0)""",
+                    """S(0)[0]S(0)[1]R->S(0)[0]S(0)[1]_S(1, 5)->S(0)R_S(1, 5)->S(0)RR->S(0)_S(1, 5)R->S(0)_S(1, 5)[0]_S(1, 5)[1]->R_S(1, 5)[0]_S(1, 5)[1]->R_S(1, 5)R->R_S(1, 5)S(0)""",  # noqa: B950
                 )
             expected_dt = _distribute_tensor(
                 input_data.clone(),
@@ -1815,6 +1815,137 @@ class DistributeWithStridedShardTest(DTensorContinuousTestBase):
                 src_data_rank=None,
             )
             self.assertEqual(sharded_dt.to_local(), expected_dt.to_local())
+
+    def test_strided_shard_to_shard_redistribution(self):
+        torch.manual_seed(42)
+        mesh_1d = init_device_mesh(self.device_type, (self.world_size,))
+        mesh_2d = init_device_mesh(self.device_type, (4, 2))
+        mesh_3d = init_device_mesh(self.device_type, (2, 2, 2))
+        input_1d = torch.randn((16, 13), device=self.device_type)
+        input_2d = torch.randn((24, 8), device=self.device_type)
+        input_3d = torch.randn((31, 13, 11), device=self.device_type)
+
+        # _StridedShard <-> Shard on 1D, 2D, and 3D meshes
+        redistribute_pairs = [
+            # (mesh, input, src_placements, dst_placements)
+            # 1D: _StridedShard(0) -> Shard(0)
+            (mesh_1d, input_1d, [_StridedShard(0, split_factor=2)], [Shard(0)]),
+            # 1D: _StridedShard(0) -> Shard(1) (cross-dim)
+            (mesh_1d, input_1d, [_StridedShard(0, split_factor=2)], [Shard(1)]),
+            # 1D: Shard(0) -> _StridedShard(0)
+            (mesh_1d, input_1d, [Shard(0)], [_StridedShard(0, split_factor=2)]),
+            # 2D: [_StridedShard(0), Replicate()] -> [Shard(0), Replicate()]
+            (
+                mesh_2d,
+                input_2d,
+                [_StridedShard(0, split_factor=3), Replicate()],
+                [Shard(0), Replicate()],
+            ),
+            # 2D: [_StridedShard(0), Shard(1)] -> [Shard(0), Shard(1)]
+            (
+                mesh_2d,
+                input_2d,
+                [_StridedShard(0, split_factor=2), Shard(1)],
+                [Shard(0), Shard(1)],
+            ),
+            # 2D: [Shard(0), Replicate()] -> [_StridedShard(0), Replicate()]
+            (
+                mesh_2d,
+                input_2d,
+                [Shard(0), Replicate()],
+                [_StridedShard(0, split_factor=3), Replicate()],
+            ),
+            # 2D: [Shard(0), Shard(1)] -> [_StridedShard(0), Shard(1)]
+            (
+                mesh_2d,
+                input_2d,
+                [Shard(0), Shard(1)],
+                [_StridedShard(0, split_factor=2), Shard(1)],
+            ),
+        ]
+        for mesh, inp, src, dst in redistribute_pairs:
+            src_dt = distribute_tensor(inp, mesh, src)
+            result_dt = src_dt.redistribute(mesh, dst)
+            expected_dt = distribute_tensor(inp, mesh, dst)
+            self.assertEqual(result_dt.to_local(), expected_dt.to_local())
+            self.assertEqual(result_dt.full_tensor(), inp)
+
+        # 3D: _StridedShard on one dim -> Shard, others unchanged
+        src_dt = _distribute_tensor(
+            input_3d.clone(),
+            mesh_3d,
+            [Shard(0), Shard(0), _StridedShard(0, split_factor=3)],
+            shard_order=(ShardOrderEntry(tensor_dim=0, mesh_dims=(0, 1, 2)),),
+            src_data_rank=None,
+        )
+        result_dt = redistribute(
+            src_dt,
+            mesh_3d,
+            [Shard(0), Shard(0), Shard(0)],
+            shard_order=(ShardOrderEntry(tensor_dim=0, mesh_dims=(0, 1, 2)),),
+        )
+        expected_dt = _distribute_tensor(
+            input_3d.clone(),
+            mesh_3d,
+            [Shard(0), Shard(0), Shard(0)],
+            shard_order=(ShardOrderEntry(tensor_dim=0, mesh_dims=(0, 1, 2)),),
+            src_data_rank=None,
+        )
+        self.assertEqual(result_dt.to_local(), expected_dt.to_local())
+
+    def test_partial_to_strided_shard_redistribution(self):
+        torch.manual_seed(42)
+
+        # 1D mesh, Partial -> _StridedShard(0)
+        mesh_1d = init_device_mesh(self.device_type, (self.world_size,))
+        input_1d = torch.randn((16, 13), device=self.device_type)
+        src_dt = DTensor.from_local(
+            input_1d.clone(), mesh_1d, [Partial("sum")], run_check=False
+        )
+        result_dt = src_dt.redistribute(mesh_1d, [_StridedShard(0, split_factor=2)])
+        reduced = input_1d * self.world_size
+        expected_dt = distribute_tensor(
+            reduced, mesh_1d, [_StridedShard(0, split_factor=2)]
+        )
+        self.assertEqual(result_dt.to_local(), expected_dt.to_local())
+        self.assertEqual(result_dt.full_tensor(), reduced)
+
+        # 2D mesh (4x2), [Partial, Replicate()] -> [_StridedShard(0), Replicate()]
+        mesh_2d = init_device_mesh(self.device_type, (4, 2))
+        input_2d = torch.randn((24, 8), device=self.device_type)
+        src_dt = DTensor.from_local(
+            input_2d.clone(), mesh_2d, [Partial("sum"), Replicate()], run_check=False
+        )
+        result_dt = src_dt.redistribute(
+            mesh_2d, [_StridedShard(0, split_factor=3), Replicate()]
+        )
+        reduced_2d = input_2d * 4
+        expected_dt = distribute_tensor(
+            reduced_2d, mesh_2d, [_StridedShard(0, split_factor=3), Replicate()]
+        )
+        self.assertEqual(result_dt.to_local(), expected_dt.to_local())
+        self.assertEqual(result_dt.full_tensor(), reduced_2d)
+
+    def test_strided_shard_to_partial_raises(self):
+        torch.manual_seed(42)
+
+        # 1D mesh
+        mesh_1d = init_device_mesh(self.device_type, (self.world_size,))
+        input_1d = torch.randn((16, 13), device=self.device_type)
+        src_dt = distribute_tensor(
+            input_1d, mesh_1d, [_StridedShard(0, split_factor=2)]
+        )
+        with self.assertRaises(RuntimeError):
+            src_dt.redistribute(mesh_1d, [Partial("sum")])
+
+        # 2D mesh
+        mesh_2d = init_device_mesh(self.device_type, (4, 2))
+        input_2d = torch.randn((24, 8), device=self.device_type)
+        src_dt = distribute_tensor(
+            input_2d, mesh_2d, [_StridedShard(0, split_factor=3), Replicate()]
+        )
+        with self.assertRaises(RuntimeError):
+            src_dt.redistribute(mesh_2d, [Partial("sum"), Replicate()])
 
 
 class TransformInfoTest(TestCase):
@@ -1844,6 +1975,23 @@ class TransformInfoTest(TestCase):
         for placements in local_cases:
             info = _TransformInfo(0, placements, [8, 8])
             self.assertIsNone(info._comm_type_key())
+
+    def test_comm_type_key_strided_shard(self):
+        """_StridedShard must produce the same comm type keys as Shard."""
+        ss = _StridedShard(0, split_factor=2)
+        test_cases = [
+            ((Partial("sum"), ss), "reduce_scatter"),
+            ((ss, Replicate()), "all_gather"),
+            ((ss, Shard(1)), "all_to_all"),
+            ((ss, _StridedShard(1, split_factor=2)), "all_to_all"),
+        ]
+        for placements, expected_key in test_cases:
+            info = _TransformInfo(0, placements, [8, 8])
+            self.assertEqual(
+                info._comm_type_key(),
+                expected_key,
+                f"_StridedShard transform {placements} should map to '{expected_key}'",
+            )
 
 
 class OptimizeFlattenedReductionsTest(TestCase):

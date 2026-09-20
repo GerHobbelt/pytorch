@@ -645,6 +645,8 @@ MPSScalar getMPSScalar(const Scalar& scalar, ScalarType type) {
     case ScalarType::ComplexDouble:
       return {.size = sizeof(int64_t), .type = type, .value.cf = scalar.to<c10::complex<float>>()};
     // Unsigned types
+    case ScalarType::UInt64:
+      return {.size = sizeof(uint64_t), .type = type, .value.u = scalar.to<uint64_t>()};
     case ScalarType::UInt32:
       return {.size = sizeof(uint32_t), .type = type, .value.i = scalar.to<uint32_t>()};
     case ScalarType::UInt16:
@@ -931,9 +933,9 @@ MetalKernelFunction* MetalShaderLibrary::getCachedKernelFunctionPtr(const std::s
   return raw_ptr;
 }
 
-class BundledShaderLibary : public MetalShaderLibrary {
+class BundledShaderLibrary : public MetalShaderLibrary {
  public:
-  BundledShaderLibary() : MetalShaderLibrary("") {}
+  BundledShaderLibrary() : MetalShaderLibrary("") {}
 
  protected:
   id<MTLLibrary> getLibrary() override {
@@ -1323,7 +1325,7 @@ void MetalShaderLibrary::exec_ternary_kernel(TensorIteratorBase& iter, const std
 }
 
 MetalShaderLibrary& MetalShaderLibrary::getBundledLibrary() {
-  static BundledShaderLibary l;
+  static BundledShaderLibrary l;
   return l;
 }
 

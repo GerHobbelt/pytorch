@@ -98,12 +98,6 @@ COPY ci_commit_pins/torchbench.txt torchbench.txt
 RUN if [ -n "${INDUCTOR_BENCHMARKS}" ]; then bash ./install_inductor_benchmark_deps.sh; fi
 RUN rm install_inductor_benchmark_deps.sh common_utils.sh timm.txt huggingface-requirements.txt torchbench.txt
 
-# (optional) Install non-default Ninja version
-ARG NINJA_VERSION
-COPY ./common/install_ninja.sh install_ninja.sh
-RUN if [ -n "${NINJA_VERSION}" ]; then bash ./install_ninja.sh; fi
-RUN rm install_ninja.sh
-
 ARG TRITON
 # Install triton, this needs to be done before sccache because the latter will
 # try to reach out to S3, which docker build runners don't have access
@@ -128,9 +122,6 @@ RUN rm install_openmpi.sh
 # Include BUILD_ENVIRONMENT environment variable in image
 ARG BUILD_ENVIRONMENT
 ENV BUILD_ENVIRONMENT ${BUILD_ENVIRONMENT}
-
-# Install LLVM dev version (Defined in the pytorch/builder github repository)
-COPY --from=pytorch/llvm:9.0.1 /opt/llvm /opt/llvm
 
 USER jenkins
 CMD ["bash"]

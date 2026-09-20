@@ -10426,7 +10426,6 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         self.common(fn, [torch.zeros([20, 20])], exact_stride=True)
 
     @config.patch(fallback_random=True)
-    @xfail_if_mps  # 100% are not close
     def test_like_rands_sliced(self):
         def fn(x):
             return (
@@ -10436,6 +10435,31 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
             )
 
         self.common(fn, (torch.zeros([3, 4])[:, ::2].permute(1, 0),), exact_stride=True)
+
+    @config.patch(fallback_random=True)
+    def test_like_randn_non_contiguous_rng_consistency(self):
+        x = torch.zeros((3, 6), device=self.device).t()
+        self.assertFalse(x.is_contiguous())
+
+        randn_like_compiled = torch.compile(torch.randn_like, backend="inductor")
+
+        torch.manual_seed(0)
+        eager_out = torch.randn_like(x)
+        torch.manual_seed(0)
+        compiled_out = randn_like_compiled(x)
+
+        self.assertEqual(eager_out, compiled_out)
+
+    @config.patch(fallback_random=False)
+    def test_fast_like_rands_decomps_use_non_eager_path(self):
+        x = torch.zeros(3, 6, device=self.device)
+
+        randn_like_compiled = torch.compile(torch.randn_like, backend="inductor")
+        torch.manual_seed(0)
+        eager_randn_out = torch.randn_like(x)
+        torch.manual_seed(0)
+        compiled_randn_out = randn_like_compiled(x)
+        self.assertNotEqual(eager_randn_out, compiled_randn_out)
 
     @config.patch(check_stack_no_cycles_TESTING_ONLY=True)
     def test_check_stack_no_cycles(self):
@@ -13480,6 +13504,85 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         FileCheck().check("def call").check_count(
             "assert_size_stride", 2, exactly=True
         ).check("extern_kernels.mm(").run(code[0])
+
+    @requires_gpu()
+    @skip_if_not_triton
+    @unittest.skipIf(
+        config.cpp_wrapper,
+        "Deferred alignment copies are not generated for cpp_wrapper",
+    )
+    def test_alignment_copy_deferred_to_first_use(self):
+        def fn(x, y, z):
+            a = torch.mm(x, y)
+            b = torch.mm(a, z)
+            return b
+
+        x = torch.randn(16, 32, device=self.device)
+        y = torch.randn(32, 64, device=self.device)
+
+        z = torch.randn(64, 8, device=self.device)
+
+        _, code = run_and_get_code(torch.compile(fn), x, y, z)
+        # z's alignment check should appear between the two mm calls:
+        # first mm (uses x, y) -> alignment clone (for z) -> second mm (uses z)
+        FileCheck().check("extern_kernels.mm(").check("copy_misaligned").check(
+            "extern_kernels.mm("
+        ).run(code[0])
+
+    @requires_gpu()
+    @skip_if_not_triton
+    @torch._inductor.config.patch(cpp_wrapper=True)
+    def test_alignment_copy_not_emitted_for_cpp_wrapper(self):
+        def fn(x, y):
+            return torch.mm(x, y)
+
+        x = torch.randn(16, 32, device=self.device)
+        y = torch.randn(32, 64, device=self.device)
+
+        _, code = run_and_get_code(torch.compile(fn), x, y)
+        # cpp_wrapper should NOT contain Python-syntax alignment copies
+        self.assertNotIn("copy_misaligned", code[0])
+
+    def test_copy_misaligned_returns_same_tensor_when_aligned(self):
+        import weakref
+
+        from torch._C._dynamo.guards import copy_misaligned
+
+        x = torch.randn(32, 32, device=self.device)
+        ref = weakref.ref(x)
+        result = copy_misaligned(x)
+        self.assertIs(result, x)
+        del x, result
+        self.assertIsNone(ref(), "aligned tensor should be freed")
+
+    def test_copy_misaligned_clones_when_misaligned(self):
+        import weakref
+
+        from torch._C._dynamo.guards import copy_misaligned
+
+        big = torch.randn(32 * 32 + 1, device=self.device)
+        x = big[1:].reshape(32, 32)
+        self.assertNotEqual(x.data_ptr() % 16, 0)
+        ref_orig = weakref.ref(x)
+        result = copy_misaligned(x)
+        self.assertIsNot(result, x)
+        self.assertEqual(result.data_ptr() % 16, 0)
+        self.assertEqual(result, x)
+        self.assertEqual(result.size(), x.size())
+        self.assertEqual(result.stride(), x.stride())
+        ref_clone = weakref.ref(result)
+        del x, result
+        self.assertIsNone(ref_clone(), "cloned tensor should be freed")
+        # orig kept alive by big's storage, that's fine
+        del big
+        self.assertIsNone(ref_orig(), "original tensor should be freed")
+
+    def test_copy_misaligned_empty_tensor(self):
+        from torch._C._dynamo.guards import copy_misaligned
+
+        x = torch.randn(0, device=self.device)
+        result = copy_misaligned(x)
+        self.assertEqual(result.size(), x.size())
 
     @torch._dynamo.config.patch(capture_dynamic_output_shape_ops=True)
     @torch._inductor.config.patch(implicit_fallbacks=True)
