@@ -144,7 +144,7 @@ from .utils import (
 from .variables.base import typestr, ValueMutationNew, VariableTracker
 from .variables.builder import FrameStateSizeEntry, VariableBuilder, wrap_fx_proxy
 from .variables.builtin import BuiltinVariable, DictBuiltinVariable
-from .variables.constant import CONSTANT_VARIABLE_NONE, ConstantVariable
+from .variables.constant import ConstantVariable
 from .variables.ctx_manager import (
     ContextWrappingVariable,
     GenericContextWrappingVariable,
@@ -1215,7 +1215,7 @@ class ExceptionStack:
                 break
 
             if context is val:
-                o.set_context(CONSTANT_VARIABLE_NONE)  # type: ignore[union-attr, arg-type]
+                o.set_context(ConstantVariable.create(None))  # type: ignore[union-attr, arg-type]
                 break
 
             o = context  # type: ignore[assignment]
@@ -2296,7 +2296,7 @@ class InstructionTranslatorBase(
                 # and performs the action of END_FOR as part of FOR_ITER. We jump
                 # to the END_FOR and run it, so we need to make sure 2 values are
                 # on the stack for it to pop.
-                self.push(CONSTANT_VARIABLE_NONE)
+                self.push(ConstantVariable.create(None))
             else:
                 # pop the iterator in Python < 3.12
                 self.pop()
@@ -2607,9 +2607,9 @@ class InstructionTranslatorBase(
                     self.push(variables.BuiltinVariable(old_exception.exc_type))
                 else:
                     # Push empty exception tb, value, type
-                    self.push(variables.CONSTANT_VARIABLE_NONE)
-                    self.push(variables.CONSTANT_VARIABLE_NONE)
-                    self.push(variables.CONSTANT_VARIABLE_NONE)
+                    self.push(ConstantVariable.create(None))
+                    self.push(ConstantVariable.create(None))
+                    self.push(ConstantVariable.create(None))
 
                 # Push new exception - tb, val, type
                 # Traceback is currently mapped to UnknownVariable
@@ -2650,7 +2650,7 @@ class InstructionTranslatorBase(
 
         val = self.pop()
         if len(self.exn_vt_stack) == 0:
-            prev_exc: VariableTracker = CONSTANT_VARIABLE_NONE
+            prev_exc: VariableTracker = ConstantVariable.create(None)
         else:
             prev_exc = self.exn_vt_stack[-1]
         self.push(prev_exc)
@@ -4062,6 +4062,7 @@ class InstructionTranslatorBase(
     BINARY_REMAINDER = stack_op(operator.mod)
     BINARY_ADD = stack_op(operator.add)
     BINARY_SUBTRACT = stack_op(operator.sub)
+
     BINARY_SUBSCR = break_graph_if_unsupported(
         push=True,
         msg_prefix="Encountered graph break when attempting to trace BINARY_SUBSCR: a binary subscript, e.g. x[attr]",
@@ -5110,7 +5111,6 @@ class InstructionTranslator(InstructionTranslatorBase):
             and not self.error_on_graph_break
             and not self.is_tracing_resume_prologue
         ):
-            # TODO graph break if one_graph is set - this might break things
             raise exc.SkipFrame(
                 "No ops traced for the FX graph. `torch.compile` will skip the frame and fall back to eager.\n"
                 f"Frame info: {format_frame_info(self.f_code)}"
@@ -5482,7 +5482,7 @@ class InliningInstructionTranslator(InstructionTranslatorBase):
 
         if self.output.should_exit:
             # graph break
-            return CONSTANT_VARIABLE_NONE  # return dummy variable
+            return ConstantVariable.create(None)  # return dummy variable
 
         assert self.symbolic_result is not None
 
@@ -5741,7 +5741,7 @@ class InliningGeneratorInstructionTranslator(InliningInstructionTranslator):
         self.generated_items.append(top)
         if len(self.generated_items) > MAX_ITERATOR_LIMIT:
             raise exc.InfiniteGeneratorError
-        self.push(CONSTANT_VARIABLE_NONE)
+        self.push(ConstantVariable.create(None))
         if (
             config.enable_faithful_generator_behavior
             or self.is_generator_from_ctx_manager

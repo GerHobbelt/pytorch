@@ -1145,6 +1145,10 @@ def _compile_fx_inner(
             )
         compiled_graph.post_compile(example_inputs, constants, graph_kwargs)
 
+        policy = config.cudagraph_policy
+        if policy is not None:
+            compiled_graph = policy.wrap_output(compiled_graph)
+
     log.debug("FX codegen and compilation took %.3fs", time.time() - start)
 
     # This message is for printing overview information of inductor mm counts, shapes,etc after lowering
@@ -3185,7 +3189,7 @@ def _aoti_flatten_inputs(
     ]
 
     if in_spec is not None and received_spec != in_spec:
-        raise ValueError(  # noqa: B904
+        raise ValueError(
             "Trying to flatten user inputs with exported input tree spec: \n"
             f"{in_spec}\n"
             "but actually got inputs with tree spec of: \n"

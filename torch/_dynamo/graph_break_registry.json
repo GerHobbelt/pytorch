@@ -577,6 +577,16 @@
       ]
     }
   ],
+  "GB4880": [
+    {
+      "Gb_type": "missing_mp_subscript",
+      "Context": "mp_subscript_impl not defined for {type(self).__name__}",
+      "Explanation": "Dynamo does not yet support subscripting '{self.python_type_name()}'.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB9741": [
     {
       "Gb_type": "skip frame due to being in functorh mode",
@@ -999,6 +1009,16 @@
       "Hints": [
         "make sure definition of {fn_name} is outside ",
         "`torch.compile` region"
+      ]
+    }
+  ],
+  "GB3775": [
+    {
+      "Gb_type": "nb_int_impl not implemented",
+      "Context": "{type(self).__name__} has nb_int slot but no nb_int_impl override",
+      "Explanation": "The type {self.python_type_name()} has an nb_int C slot but the corresponding VariableTracker doesn't implement nb_int_impl.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
       ]
     }
   ],
@@ -1748,6 +1768,22 @@
       ]
     }
   ],
+  "GB1380": [
+    {
+      "Gb_type": "Illegal __getitem__ invocation in strict mode",
+      "Context": "mp_subscript_impl {self} {key}",
+      "Explanation": "Dynamo currently does not support __getitem__ invocation in strict mode.",
+      "Hints": []
+    }
+  ],
+  "GB4240": [
+    {
+      "Gb_type": "unsupported __getitem__",
+      "Context": "mp_subscript_impl {self} {key}",
+      "Explanation": "Dynamo does not know how to handle __getitem__ on {self}",
+      "Hints": []
+    }
+  ],
   "GB0141": [
     {
       "Gb_type": "Unsupported call_id() without source",
@@ -1906,6 +1942,12 @@
     }
   ],
   "GB0153": [
+    {
+      "Gb_type": "Unsupported key type for nn.Module.__getitem__",
+      "Context": "mp_subscript_impl: {self} {key}",
+      "Explanation": "Dynamo does not support getitem on `nn.Module` with non-constant key.",
+      "Hints": []
+    },
     {
       "Gb_type": "Unsupported key type for nn.Module.__getitem__",
       "Context": "call_method: {self} {name} {args} {kwargs}",
@@ -3592,6 +3634,14 @@
   "GB0281": [
     {
       "Gb_type": "Invalid or non-const argument in nn.Module __getitem__",
+      "Context": "mp_subscript_impl: {self} {key}",
+      "Explanation": "Dynamo does not support calling method `__getitem__` of ``nn.Module`` {module} with a non-constant or non-(str, int) key.",
+      "Hints": [
+        "Use constant arguments of type str or int for __getitem__"
+      ]
+    },
+    {
+      "Gb_type": "Invalid or non-const argument in nn.Module __getitem__",
       "Context": "call_method: {self} {name} {args} {kwargs}",
       "Explanation": "Dynamo does not support calling method `{name}` of ``nn.Module`` {module} with a non-constant or non-(str, int) key.",
       "Hints": [
@@ -4242,6 +4292,16 @@
       ]
     }
   ],
+  "GB8435": [
+    {
+      "Gb_type": "missing_mp_subscript_impl",
+      "Context": "mp_subscript_impl not defined for {type(self).__name__}",
+      "Explanation": "'{self.python_type_name()}' subscript is not yet supported by Dynamo.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB0327": [
     {
       "Gb_type": "executorch_call_delegate: kwargs not supported",
@@ -4629,6 +4689,16 @@
       "Context": "expr: {expr}",
       "Explanation": "Expected `expr` to be a symbolic variable or constant.",
       "Hints": []
+    }
+  ],
+  "GB7286": [
+    {
+      "Gb_type": "nb_float_impl not implemented",
+      "Context": "{type(self).__name__} has nb_float slot but no nb_float_impl override",
+      "Explanation": "The type {self.python_type_name()} has an nb_float C slot but the corresponding VariableTracker doesn't implement nb_float_impl.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
     }
   ],
   "GB0361": [
