@@ -671,6 +671,20 @@ class CachingAutotuner(KernelInterface):
 
             self._make_launchers()
 
+    def compile_by_disabling_pipelining(self, config):
+        # self.fn.fn is dropped by prepare_for_pickle() after the initial
+        # compile; reload it so triton.compile can access the source.
+        if self.fn.fn is None:
+            assert callable(self._reload_kernel)
+            self.fn = self._reload_kernel().fn
+        cfg = copy.deepcopy(config)
+        cfg.num_stages = 1
+        if "NUM_STAGES" in cfg.kwargs:
+            cfg.kwargs["NUM_STAGES"] = 1
+        result = self._precompile_config(cfg)
+        self.compile_results = [result]
+        return result.make_launcher()
+
     def _make_launchers(self):
         if len(self.launchers) == len(self.compile_results):
             return
@@ -694,8 +708,21 @@ class CachingAutotuner(KernelInterface):
                     IntelGPUError,
                 ) as e:
                     exc = e
-        if len(launchers) == 0:
-            raise RuntimeError(f"No valid triton configs. {type(exc).__name__}: {exc}")
+            if len(launchers) == 0:
+                result = self.compile_results[-1]
+                config = result.config
+                if (
+                    isinstance(exc, (OutOfResources, torch.cuda.OutOfMemoryError))
+                    and (
+                        config.num_stages > 1 or config.kwargs.get("NUM_STAGES", 1) > 1
+                    )
+                    and self.inductor_meta.get("dynamic_disable_pipelining", True)
+                ):
+                    self.launchers = [self.compile_by_disabling_pipelining(config)]
+                    return
+                raise RuntimeError(
+                    f"No valid triton configs. {type(exc).__name__}: {exc}"
+                )
         self.launchers = launchers
 
     def prepare_for_pickle(self) -> tuple[Any, Any, Any, Any, Any, Any]:
@@ -3134,10 +3161,15 @@ def _handle_combo_kernel_per_subkernel_blocks(
     for i in range(num_kernels):
         subkernel_heuristic = combo_meta[f"heuristic_{i}"]
         size_hints_i = combo_meta[f"size_hints_{i}"]
-        tiling_scores_i = combo_meta.get(f"tiling_scores_{i}")
-        inductor_meta_i = dict(inductor_meta_clean)
-        if tiling_scores_i is not None:
-            inductor_meta_i["tiling_scores"] = tiling_scores_i
+        # Per-sub-kernel inductor_meta passthrough packed by combo_grid_meta()
+        # via TritonKernel.inductor_meta_per_kernel(). Forward into
+        # inductor_meta_i so pointwise()/_reduction_configs()/_persistent_reduction_configs()
+        # pick configs based on the actual sub-kernel .
+        inductor_meta_i = {
+            **inductor_meta_clean,
+            **combo_meta.get(f"inductor_meta_{i}", {}),
+        }
+        tiling_scores_i = inductor_meta_i.get("tiling_scores")
 
         if subkernel_heuristic == "pointwise":
             cfgs = pointwise(

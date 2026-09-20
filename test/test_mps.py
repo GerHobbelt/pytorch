@@ -4026,6 +4026,45 @@ class TestMPS(TestCaseMPS):
         # Regression test for https://github.com/pytorch/pytorch/issues/107867
         self.assertEqual(torch.tensor([[1]], device='mps').item(), 1.0)
 
+    def test_copy_to_mps_non_blocking(self):
+        # Regression test for https://github.com/pytorch/pytorch/issues/139550
+        for dtype in [torch.uint8, torch.int64, torch.float32]:
+            for _ in range(20):
+                a = torch.arange(256, dtype=dtype)
+                a = a.to("mps", non_blocking=True)
+                torch.mps.synchronize()
+                self.assertEqual(a.cpu(), torch.arange(256, dtype=dtype))
+
+    def test_blocking_storage_copy_with_pyobj(self):
+        # Hangs if the blocking CPU->MPS copy path captures a Python-wrapped src storage
+        for _ in range(50):
+            src_cpu = torch.empty(1_000_000, dtype=torch.uint8).untyped_storage()
+            dst_mps = torch.empty(1_000_000, dtype=torch.uint8, device="mps").untyped_storage()
+            dst_mps.copy_(src_cpu, non_blocking=False)
+
+    def test_synchronize_releases_gil_with_async_copy(self):
+        # Hangs if torch.mps.synchronize() holds the GIL across waitUntilCompleted
+        for _ in range(100):
+            src_cpu = torch.empty(1_000_000, dtype=torch.uint8).untyped_storage()
+            dst_mps = torch.empty(1_000_000, dtype=torch.uint8, device="mps").untyped_storage()
+            dst_mps.copy_(src_cpu, non_blocking=True)
+            torch.mps.synchronize()
+
+            x_mps = torch.randn(1000, device="mps")
+            dst_cpu = torch.empty(1000, dtype=torch.float32).untyped_storage()
+            dst_cpu.copy_(x_mps.untyped_storage(), non_blocking=True)
+            torch.mps.synchronize()
+
+    def test_event_synchronize_releases_gil_with_async_copy(self):
+        # Hangs if torch.mps.Event.synchronize() holds the GIL across waitUntilCompleted
+        for _ in range(100):
+            src_cpu = torch.empty(1_000_000, dtype=torch.uint8).untyped_storage()
+            dst_mps = torch.empty(1_000_000, dtype=torch.uint8, device="mps").untyped_storage()
+            dst_mps.copy_(src_cpu, non_blocking=True)
+            event = torch.mps.Event()
+            event.record()
+            event.synchronize()
+
     # See https://github.com/pytorch/pytorch/pull/84742
     # and https://github.com/pytorch/pytorch/pull/78319
     @parametrize("binop", ['add', 'sub', 'mul', 'div'])
@@ -10287,6 +10326,26 @@ class TestSDPA(TestCaseMPS):
         head_dim = 64  # supported head dimension for vector attention
         q, k, v = self.generate_qkv(batch, NH, q_len, s_len, head_dim, layout, dtype)
         self.run_fast_attention_test(q, k, v, with_mask)
+
+    def test_fast_vector_permuted_inputs_regression(self):
+        # Regression test for https://github.com/pytorch/pytorch/issues/181133
+        torch.manual_seed(0)
+        B, S, H, D = 84, 3, 3, 64
+        dtype = torch.float32
+        q = torch.randn(B, S, H, D, dtype=dtype)
+        k = torch.randn(B, S, H, D, dtype=dtype)
+        v = torch.randn(B, S, H, D, dtype=dtype)
+
+        q_mps = q.to("mps").permute(0, 2, 1, 3)
+        k_mps = k.to("mps").permute(0, 2, 1, 3)
+        v_mps = v.to("mps").permute(0, 2, 1, 3)
+        q_cpu = q.permute(0, 2, 1, 3)
+        k_cpu = k.permute(0, 2, 1, 3)
+        v_cpu = v.permute(0, 2, 1, 3)
+
+        y_mps = F.scaled_dot_product_attention(q_mps, k_mps, v_mps)
+        y_cpu = F.scaled_dot_product_attention(q_cpu, k_cpu, v_cpu)
+        self._compare_tensors(y_mps.cpu(), y_cpu)
 
     @unittest.skip("Full attention fast kernel not implemented yet")
     @parametrize("dtype", [torch.float16, torch.float32])
