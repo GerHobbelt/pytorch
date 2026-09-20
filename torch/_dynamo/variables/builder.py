@@ -161,6 +161,7 @@ from ..source import (
     Source,
     SubclassAttrListSource,
     TupleIteratorGetItemSource,
+    TypeMROSource,
     UnspecializedBuiltinNNModuleSource,
     UnspecializedNNModuleSource,
     UnspecializedParamBufferSource,
@@ -2407,10 +2408,31 @@ class VariableBuilder:
             self.install_guards(GuardBuilder.CONSTANT_MATCH)
             return TupleVariable([ConstantVariable.create(item) for item in value])
 
+        list_source = self.get_source()
+        first_item_source = None
+        if (
+            config.assume_dunder_attributes_remain_unchanged
+            and isinstance(list_source, TypeMROSource)
+            and isinstance(value, tuple)
+            and value
+        ):
+            first_item = value[0]
+            if (
+                isinstance(first_item, type)
+                and type.__getattribute__(first_item, "__mro__") is value
+            ):
+                first_item_source = list_source.base
         output = [
             LazyVariableTracker.create(
                 item,
-                source=GetItemSource(self.get_source(), i),
+                # Reuse the type source when this really is the type's own
+                # first MRO entry. A custom metaclass may return an MRO whose
+                # first item is a different type.
+                source=(
+                    first_item_source
+                    if i == 0 and first_item_source is not None
+                    else GetItemSource(list_source, i)
+                ),
                 tx=self.tx,
             )
             for i, item in enumerate(value)
@@ -3632,9 +3654,18 @@ class VariableBuilder:
         )
 
         # Directly do item to bypass capture_scalar_outputs
+        #
+        # Must use root_tracer, not output.create_proxy (current tracer):
+        # this VariableTracker (and the proxy it wraps) gets reused across
+        # every later reference to the same source, via
+        # output.variable_tracker_cache. If it's first built while tracing a
+        # HOP body (e.g. torch.utils.checkpoint), a sibling HOP subgraph
+        # reusing the same source later gets the cached proxy back verbatim
+        # but can't reach it via its own tracer's parent chain.
+        # See https://github.com/pytorch/pytorch/issues/193194.
         r = wrap_fx_proxy(
             self.tx,
-            self.tx.output.create_proxy(
+            self.tx.output.root_tracer.create_proxy(
                 "call_method",
                 "item",
                 *proxy_args_kwargs([unspec_var], {}),
