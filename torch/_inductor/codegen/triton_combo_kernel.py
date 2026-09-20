@@ -777,6 +777,16 @@ class ComboKernel(Kernel):
         if max_persistent_rblock > 0:
             inductor_meta["max_persistent_rblock"] = max_persistent_rblock
 
+        # Sum per-sub-kernel bandwidth / FLOP estimates for the combo launch.
+        sub_metas = [sub.inductor_meta_per_kernel() for sub in self.sub_kernels]
+        self._kernel_num_gb = sum(m.get("kernel_num_gb") or 0 for m in sub_metas)
+        if config.benchmark_kernel or config.profile_bandwidth:
+            inductor_meta["kernel_num_gb"] = self._kernel_num_gb
+        if config.benchmark_kernel:
+            inductor_meta["kernel_flop"] = sum(
+                m.get("kernel_flop") or 0 for m in sub_metas
+            )
+
         sub_kernel = selected_kernel
         if heuristics == "foreach":
             heuristics_line = f"""
@@ -989,7 +999,7 @@ class ComboKernel(Kernel):
                 code.writeline(f'pl.exit_scope("{kernel_name}")')
 
         if config.benchmark_combo_kernel:
-            code.splice(self.codegen_kernel_benchmark(num_gb=0))
+            code.splice(self.codegen_kernel_benchmark(num_gb=self._kernel_num_gb))
 
         return code.getvalue()
 
@@ -1154,7 +1164,7 @@ class ComboKernel(Kernel):
 
     def combo_grid_meta(self, size_hints_list: list[dict[str, int]]) -> dict[str, Any]:
         """
-        Build metadata used by combo-kernel grid/disaptch/autotune helpers.
+        Build metadata used by combo-kernel grid/dispatch/autotune helpers.
         """
         dynamic_shape = bool(self.dynamic_shape_args)
         num_kernels = len(self.sub_kernels)
@@ -1165,6 +1175,9 @@ class ComboKernel(Kernel):
         meta: dict[str, Any] = {
             "num_kernels": num_kernels,
             "min_blocks": min_blocks,
+            # Captured at codegen time so runtime sees the same value the
+            # source was generated with, regardless of later config changes.
+            "autotune_grouping": config.combo_kernel_autotune_grouping,
         }
 
         if not self.enable_autotune:

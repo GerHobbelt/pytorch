@@ -520,6 +520,7 @@ print(t.is_pinned())
         IS_JETSON, "oom reporting has issues on jetson igx due to partial nvml support"
     )
     def test_set_per_process_memory_fraction(self):
+        torch.cuda.empty_cache()
         orig = torch.cuda.get_per_process_memory_fraction(0)
         torch.cuda.reset_peak_memory_stats(0)
         try:
@@ -2384,6 +2385,118 @@ torch.cuda.synchronize()
         g.replay()
 
         self.assertEqual(b.sum().item(), 11000.0)
+
+    @unittest.skipIf(
+        not TEST_CUDA_GRAPH, "CUDA >= 11.0 or ROCM >= 5.3 required for graphs"
+    )
+    def test_graph_capture_stale_default_stream_error(self):
+        """Default-stream warmup + side-stream capture raises a clear error
+        (not an opaque CUDA crash) when override is not enabled."""
+        default_stream = torch.cuda.default_stream()
+        with torch.cuda.stream(default_stream):
+            model = torch.nn.Linear(32, 32).cuda()
+            x = torch.ones(4, 32, device="cuda")
+            loss = model(x).sum()
+            loss.backward()
+            model.zero_grad()
+
+        s = torch.cuda.Stream()
+        static_x = torch.ones(4, 32, device="cuda")
+
+        with torch.cuda.stream(s):
+            static_loss = model(static_x).sum()
+            static_loss.backward()
+            model.zero_grad()
+            torch.cuda.synchronize()
+            g = torch.cuda.CUDAGraph()
+            g.capture_begin(capture_error_mode="relaxed")
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError, "stale reference to the default stream"
+                ):
+                    static_loss = model(static_x).sum()
+                    static_loss.backward()
+            finally:
+                g.capture_end()
+        torch.cuda.synchronize()
+
+    @unittest.skipIf(
+        not TEST_CUDA_GRAPH, "CUDA >= 11.0 or ROCM >= 5.3 required for graphs"
+    )
+    def test_graph_capture_override_stale_stream_default_warmup(self):
+        """override_stale_capture_stream fixes default-stream warmup +
+        side-stream capture."""
+        default_stream = torch.cuda.default_stream()
+        with torch.cuda.stream(default_stream):
+            model = torch.nn.Linear(32, 32).cuda()
+            x = torch.ones(4, 32, device="cuda")
+            loss = model(x).sum()
+            loss.backward()
+            model.zero_grad()
+
+        s = torch.cuda.Stream()
+        static_x = torch.ones(4, 32, device="cuda")
+
+        torch.autograd.graph.set_override_stale_capture_stream(True)
+        try:
+            with torch.cuda.stream(s):
+                static_loss = model(static_x).sum()
+                static_loss.backward()
+                model.zero_grad()
+                torch.cuda.synchronize()
+                g = torch.cuda.CUDAGraph()
+                g.capture_begin()
+                static_loss = model(static_x).sum()
+                static_loss.backward()
+                g.capture_end()
+            torch.cuda.current_stream().wait_stream(s)
+            g.replay()
+            torch.cuda.synchronize()
+            for p in model.parameters():
+                self.assertIsNotNone(p.grad)
+        finally:
+            torch.autograd.graph.set_override_stale_capture_stream(False)
+
+    @unittest.skipIf(
+        not TEST_CUDA_GRAPH, "CUDA >= 11.0 or ROCM >= 5.3 required for graphs"
+    )
+    def test_graph_capture_override_stale_stream_side_warmup(self):
+        """override_stale_capture_stream fixes side-stream warmup +
+        different side-stream capture."""
+        warmup_stream = torch.cuda.Stream()
+        capture_stream = torch.cuda.Stream()
+
+        with torch.cuda.stream(warmup_stream):
+            model = torch.nn.Linear(32, 32).cuda()
+            x = torch.ones(4, 32, device="cuda")
+            loss = model(x).sum()
+            loss.backward()
+            model.zero_grad()
+            static_x = torch.ones(4, 32, device="cuda")
+
+        torch.cuda.synchronize()
+
+        torch.autograd.graph.set_override_stale_capture_stream(True)
+        try:
+            with torch.cuda.stream(capture_stream):
+                static_loss = model(static_x).sum()
+                static_loss.backward()
+                model.zero_grad()
+                torch.cuda.synchronize()
+                g = torch.cuda.CUDAGraph()
+                g.capture_begin()
+                static_loss = model(static_x).sum()
+                static_loss.backward()
+                g.capture_end()
+
+            torch.cuda.current_stream().wait_stream(capture_stream)
+            g.replay()
+            torch.cuda.synchronize()
+
+            for p in model.parameters():
+                self.assertIsNotNone(p.grad)
+        finally:
+            torch.autograd.graph.set_override_stale_capture_stream(False)
 
     @unittest.skipIf(
         not TEST_CUDA_GRAPH, "CUDA >= 11.0 or ROCM >= 5.3 required for graphs"
@@ -9327,6 +9440,23 @@ instantiate_parametrized_tests(TestCachingHostAllocatorCudaGraph)
 instantiate_device_type_tests(TestCudaOptims, globals())
 instantiate_device_type_tests(TestCudaDeviceParametrized, globals())
 instantiate_device_type_tests(TestCudaGreenContexts, globals(), except_for="cpu")
+
+
+# Tests for fp32_precision flag propagation that don't require an actual CUDA
+# device — they only exercise C++ context state management.
+class TestFP32PrecisionFlags(TestCase):
+    @recover_orig_fp32_precision
+    @serialTest()
+    def test_generic_fp32_precision_propagates_to_cudnn_conv_rnn(self):
+        # Regression test: setting torch.backends.fp32_precision = "ieee"
+        # must propagate to cudnn.conv and cudnn.rnn.
+        self.assertEqual(torch.backends.cudnn.conv.fp32_precision, "tf32")
+        self.assertEqual(torch.backends.cudnn.rnn.fp32_precision, "tf32")
+        with torch.backends.flags(fp32_precision="ieee"):
+            self.assertEqual(torch.backends.cudnn.conv.fp32_precision, "ieee")
+            self.assertEqual(torch.backends.cudnn.rnn.fp32_precision, "ieee")
+            self.assertEqual(torch.backends.cudnn.fp32_precision, "ieee")
+            self.assertEqual(torch.backends.cuda.matmul.fp32_precision, "ieee")
 
 
 if __name__ == "__main__":

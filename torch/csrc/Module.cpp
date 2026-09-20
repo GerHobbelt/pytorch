@@ -26,6 +26,7 @@
 #include <ATen/native/Normalization.h>
 #include <c10/core/Device.h>
 #include <c10/core/DispatchKeySet.h>
+#include <c10/core/impl/COW.h>
 #include <c10/core/impl/DeviceGuardImplInterface.h>
 #include <c10/util/AbortHandler.h>
 #include <c10/util/Backtrace.h>
@@ -1795,6 +1796,32 @@ static PyObject* THPModule_warn_on_accumulate_grad_stream_mismatch(
   END_HANDLE_TH_ERRORS
 }
 
+static PyObject* THPModule_set_override_stale_capture_stream(
+    PyObject* _unused,
+    PyObject* arg) {
+  HANDLE_TH_ERRORS
+  TORCH_CHECK(
+      PyBool_Check(arg),
+      "enabled must be a bool, "
+      "but got ",
+      THPUtils_typename(arg));
+  at::globalContext().setOverrideStaleCaptureStream(arg == Py_True);
+  Py_RETURN_NONE;
+  END_HANDLE_TH_ERRORS
+}
+
+static PyObject* THPModule_override_stale_capture_stream(
+    PyObject* _unused,
+    PyObject* noargs) {
+  HANDLE_TH_ERRORS
+  if (at::globalContext().overrideStaleCaptureStream()) {
+    Py_RETURN_TRUE;
+  } else {
+    Py_RETURN_FALSE;
+  }
+  END_HANDLE_TH_ERRORS
+}
+
 static PyObject* THCPModule_ensureCUDADeviceGuardSet(
     PyObject* self,
     PyObject* noargs) {
@@ -2077,6 +2104,14 @@ static std::initializer_list<PyMethodDef> TorchMethods = {
      nullptr},
     {"_warn_on_accumulate_grad_stream_mismatch",
      THPModule_warn_on_accumulate_grad_stream_mismatch,
+     METH_NOARGS,
+     nullptr},
+    {"_set_override_stale_capture_stream",
+     THPModule_set_override_stale_capture_stream,
+     METH_O,
+     nullptr},
+    {"_override_stale_capture_stream",
+     THPModule_override_stale_capture_stream,
      METH_NOARGS,
      nullptr},
     {"_to_dlpack",
