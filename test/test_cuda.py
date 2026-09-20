@@ -776,19 +776,22 @@ print(t.is_pinned())
             return finish - start
 
         # check default
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ""
-        self.assertLess(check_workspace_size(a) - default_workspace_size, 524288)
         self.assertLess(abs(check_workspace_size(a) - default_workspace_size), 524288)
 
-        # check default with bad user config
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = "-1"
-        self.assertLess(check_workspace_size(a) - default_workspace_size, 524288)
-        self.assertLess(abs(check_workspace_size(a) - default_workspace_size), 524288)
+        # check explicit size via API
+        explicit_size = 3072 * 1024
+        torch.backends.cuda.cublas_workspace_size(explicit_size)
+        self.assertLess(abs(check_workspace_size(a) - explicit_size), 524288)
 
-        # check valid config
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":128:8:64:16:32:32"
-        self.assertLess(check_workspace_size(a) - (3072 * 1024), 524288)
-        self.assertLess(abs(check_workspace_size(a) - (3072 * 1024)), 524288)
+        # check invalid size rejected
+        with self.assertRaisesRegex(
+            RuntimeError, "cublas workspace size must be non-negative"
+        ):
+            torch.backends.cuda.cublas_workspace_size(-1)
+
+        # restore default
+        torch._C._cuda_resetCublasWorkspaceSize()
+        self.assertLess(abs(check_workspace_size(a) - default_workspace_size), 524288)
 
         torch._C._cuda_clearCublasWorkspaces()
 
@@ -811,6 +814,118 @@ print(t.is_pinned())
         # With unified workspaces, the peak memory allocation should not increase after
         # switching to Lt, otherwise the temporary allocation would bump the peak
         self.assertEqual(warmed_alloc, lt_alloc)
+
+    @setBlasBackendsToDefaultFinally
+    def test_cublas_workspace_size_api(self):
+        # Test getter returns a positive default
+        original_size = torch.backends.cuda.cublas_workspace_size()
+        self.assertGreater(original_size, 0)
+
+        original_lt_size = torch.backends.cuda.cublaslt_workspace_size()
+        self.assertGreater(original_lt_size, 0)
+
+        # Test setter changes the value and getter reflects it
+        new_size = 64 * 1024 * 1024  # 64 MiB
+        result = torch.backends.cuda.cublas_workspace_size(new_size)
+        self.assertEqual(result, new_size)
+        self.assertEqual(torch.backends.cuda.cublas_workspace_size(), new_size)
+
+        new_lt_size = 2 * 1024 * 1024  # 2 MiB
+        result_lt = torch.backends.cuda.cublaslt_workspace_size(new_lt_size)
+        self.assertEqual(result_lt, new_lt_size)
+        self.assertEqual(torch.backends.cuda.cublaslt_workspace_size(), new_lt_size)
+
+        # Test validation rejects negative values
+        with self.assertRaisesRegex(
+            RuntimeError, "cublas workspace size must be non-negative"
+        ):
+            torch.backends.cuda.cublas_workspace_size(-1)
+        with self.assertRaisesRegex(
+            RuntimeError, "cublaslt workspace size must be non-negative"
+        ):
+            torch.backends.cuda.cublaslt_workspace_size(-1)
+
+    @setBlasBackendsToDefaultFinally
+    def test_blas_workspace_size_api(self):
+        # Dispatches to the correct backend based on preferred_blas_library()
+        pref = torch.backends.cuda.preferred_blas_library()
+        if pref == torch._C._BlasBackend.Cublaslt:
+            expected = torch.backends.cuda.cublaslt_workspace_size()
+        else:
+            # Default and Cublas both map to cuBLAS
+            expected = torch.backends.cuda.cublas_workspace_size()
+        self.assertEqual(torch.backends.cuda.blas_workspace_size(), expected)
+
+        # Explicit backend= parameter
+        self.assertEqual(
+            torch.backends.cuda.blas_workspace_size(backend="cublas"),
+            torch.backends.cuda.cublas_workspace_size(),
+        )
+        self.assertEqual(
+            torch.backends.cuda.blas_workspace_size(backend="cublaslt"),
+            torch.backends.cuda.cublaslt_workspace_size(),
+        )
+        self.assertEqual(
+            torch.backends.cuda.blas_workspace_size(
+                backend=torch._C._BlasBackend.Cublas
+            ),
+            torch.backends.cuda.cublas_workspace_size(),
+        )
+
+        # Setting via the dispatcher updates the underlying function
+        new_size = 16 * 1024 * 1024
+        torch.backends.cuda.blas_workspace_size(new_size, backend="cublas")
+        self.assertEqual(torch.backends.cuda.cublas_workspace_size(), new_size)
+
+        torch.backends.cuda.blas_workspace_size(new_size, backend="cublaslt")
+        self.assertEqual(torch.backends.cuda.cublaslt_workspace_size(), new_size)
+
+        # CK backend has no workspace
+        with self.assertRaisesRegex(
+            RuntimeError, "CK backend does not use a workspace."
+        ):
+            torch.backends.cuda.blas_workspace_size(backend="ck")
+
+        # Invalid string
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Unknown backend string. Choose from: default, cublas, hipblas, cublaslt, hipblaslt, ck.",
+        ):
+            torch.backends.cuda.blas_workspace_size(backend="invalid")
+
+        # Invalid type
+        with self.assertRaisesRegex(RuntimeError, "Unknown backend type."):
+            torch.backends.cuda.blas_workspace_size(backend=42)
+
+    @unittest.skipIf(TEST_CUDAMALLOCASYNC, "temporarily disabled for async")
+    @setBlasBackendsToDefaultFinally
+    def test_cublas_workspace_lazy_reallocation(self):
+        torch.backends.cuda.preferred_blas_library("cublas")
+
+        original_size = torch.backends.cuda.cublas_workspace_size()
+        torch._C._cuda_clearCublasWorkspaces()
+
+        # Trigger initial allocation with matmul
+        a = torch.randn(7, 7, device="cuda", requires_grad=False)
+        with torch.no_grad():
+            torch.matmul(a, a)
+
+        mem_after_first = torch.cuda.memory_stats()["active_bytes.all.allocated"]
+
+        # Increase workspace size
+        bigger_size = original_size + 32 * 1024 * 1024  # +32 MiB
+        torch.backends.cuda.cublas_workspace_size(bigger_size)
+
+        # No immediate memory change (lazy reallocation)
+        mem_after_set = torch.cuda.memory_stats()["active_bytes.all.allocated"]
+        self.assertEqual(mem_after_first, mem_after_set)
+
+        # Next matmul triggers reallocation
+        with torch.no_grad():
+            torch.matmul(a, a)
+
+        mem_after_realloc = torch.cuda.memory_stats()["active_bytes.all.allocated"]
+        self.assertGreater(mem_after_realloc, mem_after_first)
 
     def test_cublas_allow_tf32_get_set(self):
         skip_tf32_cublas = "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE" in os.environ and int(
@@ -928,6 +1043,35 @@ print(t.is_pinned())
             enabled=None, benchmark=None, deterministic=None, allow_tf32=True
         ):
             self.assertTrue(torch.backends.cudnn.allow_tf32)
+
+    def test_cudnn_depthwise_kernel_get_set(self):
+        self.assertEqual(torch.backends.cudnn.depthwise_kernel, "auto")
+
+        # Test all valid values via the flags() context manager
+        for mode in ("auto", "cudnn", "native"):
+            with torch.backends.cudnn.flags(
+                enabled=None,
+                benchmark=None,
+                deterministic=None,
+                allow_tf32=None,
+                depthwise_kernel=mode,
+            ):
+                self.assertEqual(torch.backends.cudnn.depthwise_kernel, mode)
+
+        # Invalid value should raise
+        with self.assertRaises(RuntimeError):
+            torch._C._set_cudnn_depthwise_kernel("invalid")
+
+        # Verify the flags() context manager restores the previous value
+        with torch.backends.cudnn.flags(
+            enabled=None,
+            benchmark=None,
+            deterministic=None,
+            allow_tf32=None,
+            depthwise_kernel="native",
+        ):
+            self.assertEqual(torch.backends.cudnn.depthwise_kernel, "native")
+        self.assertEqual(torch.backends.cudnn.depthwise_kernel, "auto")
 
     @recover_orig_fp32_precision
     def test_fp32_precision_with_tf32(self):
@@ -3403,7 +3547,7 @@ exit(2)
         g = torch.cuda.CUDAGraph()
         with self.assertRaisesRegex(
             RuntimeError,
-            "CUDAGeneratorImpl::set_current_seed can be called during stream capture only if new seed is the same as the original seed.",  # noqa: B950
+            "CUDAGeneratorImpl::set_current_seed can be called during stream capture only if new seed is the same as the original seed.",
         ):
             with torch.cuda.graph(g):
                 torch.cuda.manual_seed(1)
@@ -3843,14 +3987,14 @@ exit(2)
             try:
                 with torch.cuda.stream(stream):
                     mem = torch.cuda.caching_allocator_alloc(1024)
-            except BaseException:  # noqa: B036
+            except BaseException:
                 if mem is None:
                     return
             try:
                 torch.cuda.caching_allocator_delete(mem)
                 mem = None
                 return None
-            except BaseException:  # noqa: B036
+            except BaseException:
                 pass
 
         def throws_on_cuda_event(capture_error_mode):
@@ -4425,7 +4569,7 @@ class TestCudaAllocator(TestCase):
         try:
             torch.cuda.memory.empty_cache()
             torch.cuda.memory._record_memory_history("state", stacks="all")
-            x = torch.rand(311, 411, device="cuda")  # noqa: F841
+            x = torch.rand(311, 411, device="cuda")
 
             ss = torch.cuda.memory._snapshot()["segments"]
             found_it = False
@@ -4754,7 +4898,7 @@ class TestCudaAllocator(TestCase):
             def foo():
                 return torch.rand(311, 411, device="cuda")
 
-            x = foo()  # noqa: F841
+            x = foo()
 
             ss = torch.cuda.memory._snapshot()["segments"]
             found_it = False
@@ -5045,12 +5189,16 @@ class TestCudaAllocator(TestCase):
             # preemptively rejected with OutOfMemoryError.
             # Both settings must go through _accelerator_setAllocatorSettings so
             # they are read from CUDAAllocatorConfig.
+            fraction = 0.005
             torch._C._accelerator_setAllocatorSettings(
-                "throw_on_cudamalloc_oom:True,per_process_memory_fraction:0.01"
+                f"throw_on_cudamalloc_oom:True,per_process_memory_fraction:{fraction}"
             )
 
+            total_mem = torch.cuda.get_device_properties(0).total_memory
+            # Allocate the allowed threshold + 1 MiB to guarantee rejection
+            alloc_bytes = int(total_mem * fraction) + 1024 * 1024
             with self.assertRaises(torch.cuda.OutOfMemoryError):
-                torch.empty(1024 * 1024 * 1024, dtype=torch.int8, device="cuda")
+                torch.empty(alloc_bytes, dtype=torch.int8, device="cuda")
 
             # Check that rejection counter was incremented
             stats = torch.cuda.memory_stats()
@@ -8815,7 +8963,7 @@ class TestCudaDeviceParametrized(TestCase):
         # cudaEventQuery() will succeed before that happens.
 
         # See:
-        # "Before the first call to cudaEventRecord(), an event represents an empty set of work, so for example cudaEventQuery() would return cudaSuccess."  # noqa: B950
+        # "Before the first call to cudaEventRecord(), an event represents an empty set of work, so for example cudaEventQuery() would return cudaSuccess."
         # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EVENT.html
         self.assertTrue(start_event.query(), "Start event's work should be empty")
 
@@ -8855,7 +9003,7 @@ class TestCudaDeviceParametrized(TestCase):
 
             # This writes allows wait_for_cpu to proceed
             # This is an atomic store at system scope according to this rule:
-            # "the scope is thread_scope_system and it is a load or store that affects a naturally-aligned object of sizes 1, 2, 4, 8, or 16 bytes on mapped memory"  # noqa: B950
+            # "the scope is thread_scope_system and it is a load or store that affects a naturally-aligned object of sizes 1, 2, 4, 8, or 16 bytes on mapped memory"
             # https://nvidia.github.io/cccl/libcudacxx/extended_api/memory_model.html#atomicity
 
             # Note that every CPU store is implicitly system scope,

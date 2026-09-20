@@ -1640,9 +1640,24 @@ class TritonOverrides(OpOverrides):
             else:
                 cast_inputs.append(str(inp))
 
+        if torch.version.hip:
+            # AMDGCN asm strings may contain real newlines (instructions are
+            # newline-separated, unlike PTX which uses semicolons).  The
+            # generated code is nested inside two Python string layers:
+            #   Layer 1 : the cached wrapper .py file
+            #   Layer 2 : the Triton kernel source (a triple-quoted string
+            #             inside that wrapper, exec'd / JIT-compiled)
+            # repr() escapes \n -> \\n, then we double the backslashes so
+            # they survive both layers: \\\\n -> (L1 parse) \\n -> (L2 parse) \n.
+            asm_literal = repr(asm).replace("\\", "\\\\")
+            constraints_literal = repr(constraints).replace("\\", "\\\\")
+        else:
+            asm_literal = f"'{asm}'"
+            constraints_literal = f"'{constraints}'"
+
         def asm_call(args):
             return (
-                f"tl.inline_asm_elementwise('{asm}', '{constraints}', "
+                f"tl.inline_asm_elementwise({asm_literal}, {constraints_literal}, "
                 f"[{args}], dtype={asm_triton_type}, is_pure={is_pure}, pack={pack})"
             )
 
@@ -2993,6 +3008,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         override_mask=None,
         block_ptr=False,
         tma_compatibility_checker: TMACompatibilityChecker | None = None,
+        mask_constant_index=False,
     ):
         """
         Compute the index and mask to pass to tl.load() or tl.store()
@@ -3368,7 +3384,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 expand_shape = tuple([1] * len(self.dense_size_list()))
 
             index_str = f"tl.full({expand_str}, {index_str}, tl.int32)"
-            if self.fixed_config or self.is_combo_kernel:
+            if self.fixed_config or self.is_combo_kernel or mask_constant_index:
                 mask_vars = OrderedSet(
                     f"{tree.prefix}mask"
                     for tree in self.range_trees
@@ -3951,6 +3967,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
             dense_indexing=True,
             block_ptr=mode is None,
             tma_compatibility_checker=tma_compatibility_checker,
+            mask_constant_index=mode == "atomic_add",
         )
 
         if isinstance(indexing, IndexingOptions) and self._has_stride1_on_rdim(
@@ -5839,7 +5856,10 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         # Compute configs after codegen_body() so we know if the kernel
         # uses atomic ops. On HIP, buffer ops don't support atomics, so
         # we must not tag any args with pointer_range_32 in that case.
-        if torch.version.hip is not None and self.atomic_add_found:
+        # Also disable pointer_range_32 when the config flag is off.
+        if torch.version.hip is not None and (
+            self.atomic_add_found or not config.triton.emit_pointer_range_32
+        ):
             triton_meta["configs"] = [config_of(signature, pointer_range_override=())]
         else:
             triton_meta["configs"] = [config_of(signature)]

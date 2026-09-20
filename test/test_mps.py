@@ -77,8 +77,8 @@ _ref_test_ops = tuple(
 # Same logic as test_cuda.py
 if not torch.backends.mps.is_available():
     print('MPS not available, skipping tests', file=sys.stderr)
-    TestCase = NoTest  # noqa: F811
-    NNTestCase = NoTest  # noqa: F811
+    TestCase = NoTest
+    NNTestCase = NoTest
 
 total_memory = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]))
 
@@ -4989,6 +4989,45 @@ class TestMPS(TestCaseMPS):
         res_cpu = torch.sum(x_cpu)
         self.assertEqual(res_mps, res_cpu)
 
+    # TODO: fold into OpInfo-based consistency tests once reduction kernels expose
+    # explicit precision expectations per dtype.
+    def test_mean_low_prec_order(self):
+        """Regression test for fp16/bf16/half2 mean: the division must happen
+        in opmath_t (fp32 for half/bfloat, float2 for half2) BEFORE the cast
+        to the output dtype. Otherwise the fp32 accumulation done inside the
+        sum kernel is immediately discarded by a half/bfloat divide. Seen
+        in inductor/test_adaptive_avg_pool2d_low_prec_mps before the fix."""
+        torch.manual_seed(0)
+        x_fp32 = torch.randn(4, 3, 7, 7)
+        for dtype in (torch.half, torch.bfloat16, torch.complex32):
+            if dtype == torch.complex32:
+                src = torch.complex(x_fp32, x_fp32 + 1).to(torch.complex64)
+                ref = src.mean(dim=(-2, -1), keepdim=True).to(dtype)
+                mps = src.to("mps").to(dtype).mean(dim=(-2, -1), keepdim=True)
+            else:
+                src = x_fp32
+                ref = src.to(dtype).to(torch.float).mean(dim=(-2, -1), keepdim=True).to(dtype)
+                mps = src.to("mps").to(dtype).mean(dim=(-2, -1), keepdim=True)
+            self.assertEqual(mps.cpu(), ref, msg=f"mean({dtype}) diverges from fp32-intermediate reference")
+
+    # TODO: fold into OpInfo-based consistency tests once there's a hook to
+    # exercise the two-pass reduction path for scalar outputs.
+    def test_sum_full_reduction_repeated(self):
+        """Regression test for the two-pass full reduction: when
+        reduction_size doesn't divide evenly into num_groups, the last TG
+        must not read past the input. Before the fix, the MPS caching
+        allocator sometimes placed the `partials` buffer in the OOB region,
+        causing repeated sum() calls to accumulate (1x, 2x, 3x, ...)."""
+        # 102400 is the exact size that triggered the bug in
+        # inductor/test_dense_mask_index_mps: num_groups=13 initially, but
+        # 102400 / 13 has a remainder, so the pre-fix kernel read 14
+        # elements past the logical end.
+        for N in (102400, 99991, 1_000_003):
+            x = torch.randn(N, device="mps")
+            ref = x.sum().item()
+            for _ in range(4):
+                self.assertEqual(x.sum().item(), ref, msg=f"unstable sum for N={N}")
+
     # Test forward max
     # Note - don't test grad now
     def test_max_el(self):
@@ -8434,6 +8473,19 @@ class TestMPS(TestCaseMPS):
         # we should get different samples rather than the same value repeated,
         # indicating the sampling is working properly on non-contiguous tensors
         self.assertNotEqual(len(samples), 1)
+
+    def test_multinomial_large_input_no_segfault(self):
+        # Regression test for https://github.com/pytorch/pytorch/issues/178579
+        # The previous MPSGraph kernel materialized an N x N ones matrix and
+        # segfaulted for N >= 2**17
+        # this test just checks that it doesn't segfault so we don't regress
+        n = 2**17
+        probs = torch.rand(n, device="mps")
+        out = torch.multinomial(probs, 100, replacement=True)
+        torch.mps.synchronize()
+        self.assertEqual(out.shape, torch.Size([100]))
+        self.assertEqual(out.dtype, torch.int64)
+        self.assertEqual(out.device.type, "mps")
 
     def test_cumsum_dim_check(self):
         x = torch.rand((3, 3), device="mps")
@@ -12911,6 +12963,10 @@ class TestConsistency(TestCaseMPS):
         'matmul', '__rmatmul__',
         'linalg.multi_dot',
         'addbmm',
+        # Accumulates sigmoid + log + weighted sum rounding; CPU and MPS
+        # end up within ~3e-5 of fp64 but differ from each other by more
+        # than the default fp32 tolerance.
+        'nn.functional.binary_cross_entropy_with_logits',
     }
 
     def _compute_tolerances(self, op, dtype):
@@ -12926,8 +12982,10 @@ class TestConsistency(TestCaseMPS):
         if op.name in ['nn.functional.conv_transpose1d',
                        'nn.functional.conv_transpose2d',
                        'nn.functional.conv_transpose3d',
-                       '__rmatmul__', 'addbmm', 'addmv',
-                       'baddbmm', 'cov', 'matmul', 'mv'] and dtype in [torch.float16, torch.bfloat16]:
+                       '__rmatmul__', 'addbmm', 'addmm', 'addmv',
+                       'baddbmm', 'corrcoef', 'cov', 'linalg.multi_dot',
+                       'matmul', 'mv',
+                       'nn.functional.linear'] and dtype in [torch.float16, torch.bfloat16]:
             return (5e-2, 5e-2) if dtype == torch.float16 else (5e-2, 1e-1)
         if op.name == "masked.mean":
             return (7e-4, 2e-3)
@@ -12994,7 +13052,12 @@ class TestConsistency(TestCaseMPS):
                 include_conjugated_inputs=include_conjugated_inputs,
                 set_seed=True):
 
-            mps_out, cpu_out, cpu_sample = self._run_op(op, mps_sample)
+            opt_dtype = None
+
+            if op.name == "histc" and not dtype.is_floating_point and not dtype.is_complex:
+                opt_dtype = dtype
+
+            mps_out, cpu_out, cpu_sample = self._run_op(op, mps_sample, opt_dtype)
 
             atol, rtol = self._compute_tolerances(op, dtype)
             if (op.name == "nn.functional.interpolate" and dtype == torch.uint8 and
@@ -13109,7 +13172,7 @@ class TestConsistency(TestCaseMPS):
 
     # The CPU impl of grid_sampler_3d gives a large amount of error for half
     # precision types. So instead of testing MPS-vs-CPU outputs, test
-    # full-vs-half precision dtypes for MPS.
+    # full-vs-half precision dtypes for MPS (both forward and backward).
     @dtypes(torch.float16, torch.bfloat16)
     def test_grid_sampler_3d_half_precision(self, device, dtype):
         op = next((op for op in test_consistency_op_db if op.name == "grid_sampler_3d"), None)
@@ -13128,17 +13191,31 @@ class TestConsistency(TestCaseMPS):
             half_input = half_sample.input
             half_grid, mode, padding_mode, align_corners = half_sample.args
 
-            full_input = half_input.to(torch.float).detach()
-            full_grid = half_grid.to(torch.float).detach()
+            full_input = half_input.to(torch.float).detach().requires_grad_(True)
+            full_grid = half_grid.to(torch.float).detach().requires_grad_(True)
 
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
                 half_out = op(half_input, half_grid, mode, padding_mode, align_corners)
                 full_out = op(full_input, full_grid, mode, padding_mode, align_corners)
 
-            atol, rtol = 1e-4, 1e-4
-
+            atol, rtol = (1e-4, 1e-4) if dtype == torch.float16 else (5e-3, 5e-3)
             self.assertEqual(half_out, full_out.to(dtype), atol=atol, rtol=rtol)
+
+            grad_output = torch.rand_like(half_out)
+            full_grad_output = grad_output.to(torch.float)
+
+            half_grad_input, half_grad_grid = torch.autograd.grad(
+                half_out, [half_input, half_grid], grad_outputs=grad_output)
+            full_grad_input, full_grad_grid = torch.autograd.grad(
+                full_out, [full_input, full_grid], grad_outputs=full_grad_output)
+
+            # grad_grid uses direct stores — same tolerance as forward
+            self.assertEqual(half_grad_grid, full_grad_grid.to(dtype), atol=atol, rtol=rtol)
+            # grad_input uses atomic half-precision accumulation, which is
+            # non-deterministic and introduces more rounding than forward
+            bwd_atol, bwd_rtol = (5e-3, 2e-2) if dtype == torch.float16 else (1e-1, 5e-1)
+            self.assertEqual(half_grad_input, full_grad_input.to(dtype), atol=bwd_atol, rtol=bwd_rtol)
 
     def test_grid_sampler_3d_nan(self, device):
         input = torch.ones(1, 1, 3, 3, 3)
@@ -13463,6 +13540,45 @@ class TestMetalLibrary(TestCaseMPS):
         lib.do_max(z0, z1, x)
         self.assertTrue(z0.isnan().all().item(), f"results are {z0}, but all elements should have been nan")
         self.assertTrue((z1 == idx).all().item(), f"results are {z1}, but all elements should have been {idx}")
+
+    def test_reduction_utils_complex(self):
+        """Test simd_sum and simd_prod for float2 (complex64)."""
+        lib = torch.mps.compile_shader("""
+            #include <c10/metal/reduction_utils.h>
+            kernel void do_sum(device float2* out,
+                               constant float2* inp,
+                               uint idx [[thread_position_in_grid]]) {
+                out[idx] = c10::metal::simd_sum(inp[idx]);
+            }
+
+            kernel void do_prod(device float2* out,
+                                constant float2* inp,
+                                uint idx [[thread_position_in_grid]]) {
+                out[idx] = c10::metal::simd_prod(inp[idx]);
+            }
+        """)
+
+        # Test simd_sum: all 32 lanes get the same total
+        x = torch.randn(28, device="mps", dtype=torch.complex64)
+        y = torch.empty_like(x)
+        lib.do_sum(y, x)
+        x_sum = x.sum()
+        max_err = (y - x_sum).abs().max().item()
+        self.assertLess(max_err, 1e-4, f"simd_sum error {max_err}, expected {x_sum}")
+
+        # Test simd_prod: product of a few small complex numbers
+        # Use only 4 non-unit values to keep the product numerically stable
+        x_prod = torch.ones(32, device="mps", dtype=torch.complex64)
+        x_prod[0] = 1 + 2j
+        x_prod[1] = 3 - 1j
+        x_prod[2] = -1 + 1j
+        x_prod[3] = 2 + 0j
+        y_prod = torch.empty_like(x_prod)
+        lib.do_prod(y_prod, x_prod, threads=(32,), group_size=(32,))
+        expected_prod = x_prod.prod()
+        # Only lane 0 has the final result for shuffle-down reduction
+        max_err = (y_prod[0] - expected_prod).abs().item()
+        self.assertLess(max_err, 1e-4, f"simd_prod error {max_err}, expected {expected_prod}")
 
     @parametrize("dtype", [torch.float32, torch.float16, torch.int32, torch.bfloat16])
     def test_atomic_add(self, dtype):
