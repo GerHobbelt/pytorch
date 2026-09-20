@@ -12,6 +12,7 @@ import torch
 from torch.distributed import is_available
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed._pycute import IntTuple, is_int, suffix_product
+from torch.types import IntLikeType
 from torch.utils._typing_utils import not_none
 
 
@@ -1220,7 +1221,7 @@ else:
             """
             return self._coordinate_on_dim
 
-        def _sym_get_coordinate(self, index: int) -> int:
+        def _sym_get_coordinate(self, index: int) -> IntLikeType:
             import torch.distributed.config as config
             from torch._guards import detect_fake_mode
 
@@ -1532,14 +1533,14 @@ else:
         if mesh_dim_names is not None:
             if len(set(mesh_dim_names)) != len(mesh_dim_names):
                 raise RuntimeError(
-                    "Each mesh_dim_name must be unique.",
-                    f"Found repeated mesh_dim_name in mesh_dim_names {mesh_dim_names}",
+                    "Each mesh_dim_name must be unique. "
+                    f"Found repeated mesh_dim_name in mesh_dim_names {mesh_dim_names}"
                 )
 
             if len(mesh_shape) != len(mesh_dim_names):
                 raise RuntimeError(
-                    "mesh_shape and mesh_dim_names should have same length!",
-                    f"Found len(mesh_dim_names): {len(mesh_dim_names)} and len(mesh_shape):{len(mesh_shape)}.",
+                    "mesh_shape and mesh_dim_names should have same length! "
+                    f"Found len(mesh_dim_names): {len(mesh_dim_names)} and len(mesh_shape):{len(mesh_shape)}."
                 )
 
         if backend_override is not None:

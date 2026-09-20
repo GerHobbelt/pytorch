@@ -1218,6 +1218,21 @@ class ReproTests(torch._dynamo.test_case.TestCase):
         compiled_out = compiled_fn(x)
         self.assertEqual(eager_out, compiled_out)
 
+    # https://github.com/pytorch/pytorch/issues/166626
+    def test_inplace_add_from_meta_tensor_factory(self):
+        def fn(x):
+            log_det = torch.zeros(x.size(0), device=x.device)
+            log_det += torch.zeros(x.size(0), device="meta")
+            return log_det
+
+        x = torch.randn(2, 4)
+        eager_out = fn(x)
+        compiled_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        compiled_out = compiled_fn(x)
+
+        self.assertEqual(eager_out.device, compiled_out.device)
+        self.assertEqual(eager_out, compiled_out)
+
     # https://github.com/pytorch/pytorch/issues/109053
     def test_view_dtype_overload(self):
         def f(x):
@@ -4327,16 +4342,18 @@ class ReproTests(torch._dynamo.test_case.TestCase):
         self.assertTrue(same(fn(x), opt_fn(x)))
 
     def test_add_sub_alpha_out(self):
-        inp = torch.randn(2, 3, 4)
-        other = 1
-        alpha = 2
+        test_cases = (
+            (torch.randn(2, 3, 4), 1, 2, torch.zeros(2, 3, 4)),
+            (2, 1.1, 0.4, torch.tensor(0.0)),
+        )
         for op in [torch.add, torch.sub]:
-            out = torch.zeros(2, 3, 4)
-            compile_out = torch.zeros(2, 3, 4)
-            op(inp, other, alpha=alpha, out=out)
-            compiled_fn = torch.compile(op, dynamic=True, backend="eager")
-            compiled_fn(inp, other, alpha=alpha, out=compile_out)
-            self.assertTrue(same(out, compile_out))
+            for inp, other, alpha, out in test_cases:
+                compiled_fn = torch.compile(op, dynamic=True, backend="eager")
+                eager_out = out.clone()
+                compiled_out = out.clone()
+                op(inp, other, alpha=alpha, out=eager_out)
+                compiled_fn(inp, other, alpha=alpha, out=compiled_out)
+                self.assertTrue(same(eager_out, compiled_out))
 
     def test_negative_shape_guard(self):
         def fn(x):
@@ -8024,6 +8041,24 @@ SavedForBackwardsAOTOutput(idx=5)""",
         result = f(torch.randn(5))
         self.assertEqual(result, 5)
 
+    def test_one_hot_bounds_check_compiled(self):
+        # https://github.com/pytorch/pytorch/issues/144211
+        # torch.compile(one_hot) should raise on out-of-bounds indices,
+        # not silently produce wrong results.
+        one_hot = torch.compile(torch.nn.functional.one_hot, fullgraph=True)
+
+        a = torch.arange(0, 5) % 3  # [0, 1, 2, 0, 1]
+        with self.assertRaises(RuntimeError):
+            one_hot(a, 1)
+
+        torch._dynamo.reset()
+        with self.assertRaises(RuntimeError):
+            one_hot(torch.tensor([-1, 0, 1]), 3)
+
+        torch._dynamo.reset()
+        expected = torch.nn.functional.one_hot(a, 3)
+        self.assertEqual(one_hot(a, 3), expected)
+
 
 class ReproTestsDevice(torch._dynamo.test_case.TestCase):
     def test_sub_alpha_scalar_repro(self, device):
@@ -8941,8 +8976,6 @@ class ReproTestsDevice(torch._dynamo.test_case.TestCase):
         self.assertEqual(result.item(), 4.0)
 
     def test_enum_with_class_values(self):
-        # Enum whose members are user-defined classes; calling .value()
-        # instantiates the class, which Dynamo can't trace.
         from enum import Enum
 
         class AvgMetric:
@@ -8976,6 +9009,44 @@ class ReproTestsDevice(torch._dynamo.test_case.TestCase):
 
         logger = ScalarLogger()
         fn(logger, torch.tensor(1.0))
+
+    def test_class_attr_mutation_recompiles(self):
+        class GlobalState:
+            factor = 1.0
+
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @torch.compile(backend=cnt)
+        def fn(x):
+            return x * GlobalState.factor
+
+        x = torch.tensor([4.0])
+
+        GlobalState.factor = 1.0
+        result1 = fn(x)
+        self.assertEqual(result1, torch.tensor([4.0]))
+        self.assertEqual(cnt.frame_count, 1)
+
+        GlobalState.factor = 10.0
+        result2 = fn(x)
+        self.assertEqual(result2, torch.tensor([40.0]))
+        self.assertEqual(cnt.frame_count, 2)
+
+    @skipIfHpu
+    @requires_cuda
+    def test_deterministic_pad_replicate_compile(self, device):
+        from torch.testing._internal.common_utils import DeterministicGuard
+
+        pad = torch.nn.ReplicationPad1d(2).to(device)
+        compiled_pad = torch.compile(pad, backend="aot_eager", fullgraph=True)
+        x = torch.randn(3, 3, device=device, requires_grad=True)
+        with DeterministicGuard(True):
+            ref = pad(x)
+            res = compiled_pad(x)
+            self.assertEqual(ref, res)
+            grad = torch.autograd.grad(res.sum(), x)
+            ref_grad = torch.autograd.grad(ref.sum(), x)
+            self.assertEqual(grad, ref_grad)
 
 
 instantiate_parametrized_tests(ReproTests)
