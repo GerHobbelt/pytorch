@@ -988,6 +988,7 @@ class _StridedShard(torch._C._distributed.StridedShard):
         # indices_tensor is 1D torch.arange(logical_dim_size) unsqueezed
         # so that we can reuse self._split_tensor which splits on self.dim
         shape = [1] * self.dim + [logical_dim_size]
+        # pyrefly: ignore [no-matching-overload]
         indices_tensor = torch.arange(
             logical_dim_size, device=local_tensor.device
         ).view(shape)
@@ -1129,6 +1130,7 @@ class _StridedShard(torch._C._distributed.StridedShard):
         # indices_tensor is 1D torch.arange(logical_dim_size) unsqueezed
         # so that we can reuse self._split_tensor which splits on self.dim
         shape = [1] * self.dim + [curr_local_size]
+        # pyrefly: ignore [no-matching-overload]
         indices_tensor = torch.arange(
             curr_local_size,
         ).view(shape)
@@ -1397,8 +1399,10 @@ class _MaskPartial(Partial):
             tensor >= local_offset_on_dim + local_shard_size
         )
         # mask the input tensor
+        # pyrefly: ignore [unsupported-operation]
         masked_tensor = tensor.clone() - local_offset_on_dim
         masked_tensor[mask] = 0
+        # pyrefly: ignore [bad-return]
         return mask, masked_tensor
 
     def _partition_value(
