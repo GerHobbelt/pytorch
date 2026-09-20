@@ -6,6 +6,7 @@ from collections import namedtuple
 import os
 import sys
 import torch
+import torch._dynamo.config
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.functional import scaled_dot_product_attention
@@ -450,6 +451,7 @@ class TestTransformers(NNTestCase):
         with torch.no_grad():
             model(src, src_mask=src_mask)
 
+    @torch._dynamo.config.patch(nested_graph_breaks=False)
     @parametrize("nhead", [3, 4])
     def test_transformerencoderlayer_no_fastpath_with_hooks(self, device, nhead):
         batch_size = 2
@@ -1585,6 +1587,31 @@ class TestSDPAFailureModes(NNTestCase):
     """
     _do_cuda_memory_leak_check = True
     _do_cuda_non_default_stream = True
+
+    @parametrize(
+        "backend",
+        [
+            None,
+            SDPBackend.ERROR,
+            SDPBackend.MATH,
+            SDPBackend.FLASH_ATTENTION,
+            SDPBackend.EFFICIENT_ATTENTION,
+            SDPBackend.CUDNN_ATTENTION,
+            SDPBackend.OVERRIDEABLE,
+        ],
+        name_fn=lambda backend: "default" if backend is None else backend.name.lower(),
+    )
+    def test_attn_mask_and_is_causal_errors_before_dispatch(self, device, backend):
+        q = torch.randn(2, 4, 8, 16, device=device)
+        k = torch.randn(2, 4, 8, 16, device=device)
+        v = torch.randn(2, 4, 8, 16, device=device)
+        attn_mask = torch.zeros(8, 8, device=device)
+
+        expected_error = "_scaled_dot_product_attention: Explicit attn_mask should not be set when is_causal=True"
+        context = contextlib.nullcontext() if backend is None else sdpa_kernel(backends=[backend])
+        with context:
+            with self.assertRaisesRegex(RuntimeError, expected_error):
+                F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=True)
 
     @onlyCUDA
     @unittest.skipIf(
