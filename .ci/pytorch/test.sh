@@ -469,6 +469,7 @@ test_python_smoke() {
   # Smoke tests for H100/B200
   install_nvmath
   time python test/run_test.py --include inductor/test_flex_attention -k test_tma_with_customer_kernel_options $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
+  time python test/run_test.py --include test_cuda -k test_graph_capture_cublas_workspace $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
   time python test/run_test.py --include test_matmul_cuda test_scaled_matmul_cuda inductor/test_fp8 inductor/test_max_autotune inductor/test_cutedsl_grouped_mm $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
   time python test/run_test.py --include test_foreach -k TestForeachMM $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
   time python test/run_test.py --include test_linalg -k polar $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
@@ -585,6 +586,8 @@ test_h100_fabric() {
 }
 
 test_b200_symm_mem() {
+  # TODO: fix the op to reuse/free teams instead of raising this limit.
+  export NVSHMEM_MAX_TEAMS=512
   _run_fabric_handle_tests
 }
 
@@ -593,6 +596,29 @@ test_h100_cutlass_backend() {
   git submodule update --init --depth 1 third_party/cutlass
   TORCHINDUCTOR_CUTLASS_DIR=$(realpath "./third_party/cutlass") python test/run_test.py --include inductor/test_cutlass_backend $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
   TORCHINDUCTOR_CUTLASS_DIR=$(realpath "./third_party/cutlass") python test/run_test.py --include inductor/test_cutlass_evt $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
+}
+
+test_native_aot() {
+  # These suites exercise the Python JIT route too, so they need the DSL runtime.
+  # Installed here rather than in requirements-ci.txt, which is shared by every
+  # image and would put ~190 MB of CUDA-only tooling into the CPU, ROCm and XPU
+  # images as well.
+  install_cutlass_dsl
+
+  # Assert the wheel under test carries the kernels stage 2 embedded: without
+  # them every routing test below passes vacuously on the JIT/aten fallbacks.
+  # cd test, because from the repo root the source torch/ dir shadows the
+  # installed wheel, same as the ASAN smoke checks above.
+  (cd test && python -c "
+from torch._native import _native_aot_embedded
+assert _native_aot_embedded(), 'AOT kernels not embedded: stage 2 did not run in the build'
+print('native-AOT: embedded kernels detected')
+")
+  local native_aot_tests=()
+  for f in test/python_native/test_*.py; do
+    native_aot_tests+=("${f#test/}")
+  done
+  time python test/run_test.py --include "${native_aot_tests[@]%.py}" $PYTHON_TEST_EXTRA_OPTION --upload-artifacts-while-running
 }
 
 test_xpu_sycl_tla_backend() {
@@ -2658,6 +2684,8 @@ elif [[ "${TEST_CONFIG}" == "b200-symm-mem" ]]; then
   test_b200_symm_mem
 elif [[ "${TEST_CONFIG}" == h100_cutlass_backend ]]; then
   test_h100_cutlass_backend
+elif [[ "${TEST_CONFIG}" == native_aot ]]; then
+  test_native_aot
 elif [[ "${TEST_CONFIG}" == openreg ]]; then
   test_openreg
 elif [[ "${TEST_CONFIG}" == "tsan" ]]; then
