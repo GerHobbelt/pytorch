@@ -769,12 +769,24 @@ class GuardManagerWrapper:
             return body.getvalue()
 
     def check(self, x: Any) -> bool:
-        # Only needed for debugging purposes.
-        return self.root.check(x)
+        # RootGuardManager::check_nopybind_template disables the TorchFunction
+        # TLS for its accessors and restores it on every exit but a throw, which
+        # would leave the calling thread disabled: put it back on that exit.
+        torch_function_state = torch._C._get_torch_function_state()
+        try:
+            return self.root.check(x)
+        except BaseException:
+            torch._C._set_torch_function_state(torch_function_state)
+            raise
 
     def check_verbose(self, x: Any) -> GuardDebugInfo:
-        # Only needed for debugging purposes.
-        return self.root.check_verbose(x)
+        # check_verbose_nopybind has the same non-RAII exit as check() above.
+        torch_function_state = torch._C._get_torch_function_state()
+        try:
+            return self.root.check_verbose(x)
+        except BaseException:
+            torch._C._set_torch_function_state(torch_function_state)
+            raise
 
     def populate_code_parts_for_debugging(self) -> None:
         # This should be called when the guard manager is fully populated
@@ -787,20 +799,25 @@ class GuardManagerWrapper:
                 code_parts.append(code_part)
             return code_parts
 
-        def visit(mgr: GuardManager) -> None:
+        def add_code_parts(guard: LeafGuard) -> None:
             nonlocal relational_guards_seen
-            for guard in mgr.get_leaf_guards():
-                if isinstance(guard, RelationalGuard):
-                    if guard not in relational_guards_seen:
-                        self.code_parts.extend(get_code_parts(guard))
-                        relational_guards_seen.add(guard)
-                else:
+            if isinstance(guard, RelationalGuard):
+                if guard not in relational_guards_seen:
                     self.code_parts.extend(get_code_parts(guard))
+                    relational_guards_seen.add(guard)
+            else:
+                self.code_parts.extend(get_code_parts(guard))
+
+        def visit(mgr: GuardManager) -> None:
+            for guard in mgr.get_leaf_guards():
+                add_code_parts(guard)
 
             for child_mgr in mgr.get_child_managers():
                 visit(child_mgr)
 
         visit(self.root)
+        for guard in self.root.get_epilogue_lambda_guards():
+            add_code_parts(guard)
 
 
 def from_numpy(a: Any) -> torch.Tensor:
