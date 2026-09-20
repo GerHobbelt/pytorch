@@ -106,7 +106,7 @@ from .utils import (
 def _unwrap_tensor_subclasses_no_symints(
     args: list[Any],
 ) -> list[Any]:
-    return runtime_unwrap_tensor_subclasses(args, append_symints=False)
+    return runtime_unwrap_tensor_subclasses(args, append_symints=False)  # type: ignore[arg-type]
 
 
 zip = strict_zip
@@ -967,7 +967,7 @@ def _create_runtime_wrapper(
         def _replay_alias(self, orig_inputs, fw_outs):
             return _codegen_alias_fn(orig_inputs, fw_outs)
 
-        runtime_epilogue._replay_output_aliases = types.MethodType(
+        runtime_epilogue._replay_output_aliases = types.MethodType(  # type: ignore[attr-defined]
             _replay_alias,
             runtime_epilogue,
         )
@@ -1058,7 +1058,7 @@ def _create_runtime_wrapper(
         )
         import types
 
-        runtime_epilogue._apply_input_mutations = types.MethodType(
+        runtime_epilogue._apply_input_mutations = types.MethodType(  # type: ignore[attr-defined]
             lambda self, orig_inputs, updated_inputs: codegen_apply_mutations(
                 orig_inputs, updated_inputs
             ),
@@ -1724,7 +1724,7 @@ class AOTDedupeWrapper(CompilerWrapper):
         )
         from .subclass_codegen import _compile_and_exec_source
 
-        wrapped_compiled_fn: Callable[..., Any] = _compile_and_exec_source(
+        wrapped_compiled_fn: Callable[..., Any] = _compile_and_exec_source(  # type: ignore[assignment]
             source,
             {"compiled_fn": compiled_fn},
             "inner_fn",
@@ -1983,14 +1983,23 @@ class AOTSyntheticBaseWrapper(CompilerWrapper):
 
         lines.append(f"    _bases = [None] * {num_bases}")
         for base_idx in sorted(base_groups):
-            first_orig = base_groups[base_idx][0]
+            group = base_groups[base_idx]
+            first_orig = group[0]
+            if len(group) == 1:
+                indices_check = f"args[{first_orig}]._base is not None"
+                base_expr = f"args[{first_orig}]._base"
+            else:
+                indices_str = ", ".join(str(i) for i in group)
+                indices_check = (
+                    f"any(args[_i]._base is not None for _i in [{indices_str}])"
+                )
+                base_expr = f"next(args[_i]._base for _i in [{indices_str}] if args[_i]._base is not None)"
             lines.append(f"""\
-    _a = args[{first_orig}]
-    if _a._base is not None:
-        _bases[{base_idx}] = _a._base
+    if {indices_check}:
+        _bases[{base_idx}] = {base_expr}
     else:
-        _b = torch.empty((0,), dtype=_a.dtype, device=_a.device)
-        _b.set_(_a.untyped_storage())
+        _b = torch.empty((0,), dtype=args[{first_orig}].dtype, device=args[{first_orig}].device)
+        _b.set_(args[{first_orig}].untyped_storage())
         _bases[{base_idx}] = _b""")
 
         other_items = ", ".join(f"args[{orig}]" for orig in other_indices)
