@@ -1,5 +1,7 @@
 import functools
 import logging
+import sys
+from typing import cast
 
 from packaging.version import Version
 
@@ -9,6 +11,7 @@ from .common_utils import (
     check_native_jit_disabled,
     check_native_version_skip,
 )
+from .dsl_registry import dsl_registry, DSLModuleProtocol
 from .registry import (
     _OpFn,
     deregister_op_overrides as _deregister_op_overrides_impl,
@@ -24,6 +27,7 @@ _CUTEDSL_REQUIRED_VERSIONS: set[Version] = {
     # Current version - Note Version.from_part(release=(4.4.1)) is better
     #                   but > v26 of packaging.
     Version(f"{4}.{4}.{1}"),
+    Version(f"{4}.{4}.{2}"),
 }
 
 
@@ -116,3 +120,8 @@ def register_op_override(
         allow_multiple_override=allow_multiple_override,
         unconditional_override=unconditional_override,
     )
+
+
+# Register this DSL module with the registry
+# Note: Import-time registration ensures DSL is available when module is loaded
+dsl_registry.register_dsl("cutedsl", cast(DSLModuleProtocol, sys.modules[__name__]))
