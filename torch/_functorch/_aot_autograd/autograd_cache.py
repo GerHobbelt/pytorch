@@ -33,6 +33,7 @@ from torch._functorch import config
 from torch._inductor.codecache import (
     _ident,
     add_ephemeral_timeout_increase_for_distributed,
+    AOTAUTOGRAD_CACHE_PREFIX,
     BypassFxGraphCache,
     create_cache,
     extract_tensor_metadata_for_cache_key,
@@ -524,7 +525,7 @@ class AOTAutogradCacheDetails(FxGraphHashDetails):
             # FXGraphCache has constraints on what can be pickled in its inductor
             # config. Check that the gm is cacheable by inductor first,
             # and if it raises an exception, also bypass on our end.
-            FxGraphCache._check_can_cache(gm)
+            FxGraphCache._check_can_cache(gm, example_inputs, fx_config)
             super().__init__(gm, example_inputs, fx_config, [])
         except BypassFxGraphCache as e:
             # Sometimes inductor configs are unpickleable and can fail
@@ -810,7 +811,7 @@ def autograd_cache_key(
             )
             pickler = AOTAutogradCachePickler(gm)
             # The prefix distinguishes among the other kinds of objects we cache
-            key = "a" + pickler.get_hash(details)
+            key = AOTAUTOGRAD_CACHE_PREFIX + pickler.get_hash(details)
             debug_lines = _get_debug_lines_for_cache_key(pickler, details, key)
             return key, debug_lines
         except Exception:

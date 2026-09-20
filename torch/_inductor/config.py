@@ -971,6 +971,9 @@ split_reductions = os.getenv("TORCHINDUCTOR_SPLIT_REDUCTIONS", "1") == "1"
 # if we know they affect numerics.  WARNING: Expect perf hit in this mode.
 deterministic = os.getenv("TORCHINDUCTOR_DETERMINISTIC") == "1"
 
+# Batch-invariant mode: stable per-sample compiled kernel across batch sizes. Implies deterministic.
+batch_invariant = os.getenv("TORCHINDUCTOR_BATCH_INVARIANT") == "1"
+
 # When we do split reduction, this number control the minimum value for
 # num_split. Too small num_split make the split reduction less efficient.
 # It's a much bigger problem when we compile a dynamic shape kernel with
@@ -1172,6 +1175,9 @@ class aten_distributed_optimizations:
     # In deterministic mode, this setting is ignored and "analytical" is used.
     compute_estimator: Literal["analytical", "benchmark"] = "benchmark"
 
+    # Chrome Trace JSON path for profile-guided runtime estimation.
+    profile_guided_estimations_profile_path: str | None = None
+
     # Maximum memory increase above baseline for prefetch operations
     # Uses minimum of absolute cap and ratio of baseline
     max_memory_increase_gb: float | None = None  # Absolute cap in GB
@@ -1321,6 +1327,15 @@ strict_static_cuda_launcher: bool = (
 # Alias of strict_static_cuda_launcher, used by both CUDA/XPU.
 strict_static_triton_launcher: bool = Config(
     alias="torch._inductor.config.strict_static_cuda_launcher"
+)
+
+# Use _FastCudaLauncher (vectorcall C extension) instead of
+# StaticallyLaunchedCudaKernel.run for the CachingAutotuner fast path.
+# Pre-binds kernel metadata at first launch and uses THPVariable_Unpack +
+# tensor.data_ptr() in C++ to bypass PyArg_ParseTuple, cuPointerGetAttribute,
+# and cuCtxGetCurrent.
+use_fast_triton_launcher: bool = (
+    os.environ.get("TORCHINDUCTOR_USE_FAST_TRITON_LAUNCHER", "1") == "1"
 )
 
 # gemm autotuning global cache dir
@@ -1984,6 +1999,10 @@ class triton:
     # If set to true, will skip some non-critical checks in the mix order reduction
     # this could be helpful to avoid recompilations in some cases
     mix_order_reduction_non_strict_mode = False
+
+    # Maximum external read buffers (loads) in a mix-order reduction
+    # kernel. Set to 0 to disable the check.
+    mix_order_reduction_max_reads = 10
 
     # Don't allow multi-stages by default to avoid out of shared memory
     mix_order_reduction_allow_multi_stages = (

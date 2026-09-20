@@ -89,7 +89,6 @@ from .base import (
 from .constant import ConstantVariable, FakeIdVariable
 from .dicts import (
     ConstDictVariable,
-    DefaultDictVariable,
     DictItemsVariable,
     DictKeysVariable,
     DictViewVariable,
@@ -104,9 +103,10 @@ from .lists import (
     TupleIteratorVariable,
     TupleVariable,
 )
-from .misc import NullVariable
+from .misc import NullVariable, StringFormatVariable
 from .sets import FrozensetVariable, OrderedSetClassVariable, SetVariable
 from .tensor import (
+    DataPtrVariable,
     FakeItemVariable,
     supported_comparison_ops,
     SymNodeVariable,
@@ -838,6 +838,20 @@ class BuiltinVariable(BaseBuiltinVariable):
                     ]
                 )
 
+                if op in (operator.eq, operator.ne):
+
+                    def compare_by_method(
+                        tx: "InstructionTranslator",
+                        a: VariableTracker,
+                        b: VariableTracker,
+                    ) -> VariableTracker:
+                        method_name = "__eq__" if op is operator.eq else "__ne__"
+                        return a.call_method(tx, method_name, [b], {})
+
+                    result.append(
+                        ((DataPtrVariable, VariableTracker), compare_by_method)
+                    )
+
                 def handler(
                     tx: "InstructionTranslator", a: VariableTracker, b: VariableTracker
                 ) -> VariableTracker:
@@ -1414,11 +1428,15 @@ class BuiltinVariable(BaseBuiltinVariable):
 
                 return wrap_fx_proxy_cls(variables.NumpyNdarrayVariable, tx, proxy)
 
-            if fn is operator.eq and len(args) == 2 and args[0].is_tensor():
-                # Dynamo expects `__eq__` str while operator.eq gives just `eq`
-                # TODO - supporting all comparison operators could also work but
-                # it fails lots of tests because graph str changes.
-                return args[0].call_method(tx, "__eq__", list(args[1:]), kwargs)
+            if (
+                fn in (operator.eq, operator.ne)
+                and len(args) == 2
+                and args[0].is_tensor()
+            ):
+                # Dynamo expects `__eq__` / `__ne__` strings while operator.{eq,ne}
+                # provides call_function dispatch first.
+                method_name = "__eq__" if fn is operator.eq else "__ne__"
+                return args[0].call_method(tx, method_name, list(args[1:]), kwargs)
             proxy = tx.output.create_proxy(
                 "call_function",
                 fn,
@@ -1680,7 +1698,7 @@ class BuiltinVariable(BaseBuiltinVariable):
             (
                 RangeVariable,
                 ConstDictVariable,
-                DefaultDictVariable,
+                variables.DefaultDictVariable,
                 OrderedSetClassVariable,
                 DictViewVariable,
             ),
@@ -2077,6 +2095,7 @@ class BuiltinVariable(BaseBuiltinVariable):
             (
                 ConstantVariable,
                 SymNodeVariable,
+                StringFormatVariable,
                 TensorVariable,
                 ListVariable,
                 TupleVariable,
@@ -2707,7 +2726,7 @@ class BuiltinVariable(BaseBuiltinVariable):
     ) -> VariableTracker:
         format_string = _format_string.as_python_constant()
         format_string = str(format_string)
-        return variables.StringFormatVariable.create(format_string, args, kwargs)
+        return StringFormatVariable.create(format_string, args, kwargs)
 
     def call_id(
         self, tx: "InstructionTranslator", *args: VariableTracker
@@ -3180,9 +3199,19 @@ class DictBuiltinVariable(BaseBuiltinVariable):
                 )
                 return result
             elif user_cls is defaultdict:
-                return DefaultDictVariable(
-                    items, user_cls, mutation_type=ValueMutationNew()
+                from .builder import SourcelessBuilder
+                from .user_defined import DefaultDictVariable
+
+                result = tx.output.side_effects.track_new_user_defined_object(
+                    SourcelessBuilder.create(tx, dict),
+                    SourcelessBuilder.create(tx, defaultdict),
+                    [],
                 )
+                assert isinstance(result, DefaultDictVariable)
+                result._base_vt = ConstDictVariable(
+                    items, mutation_type=ValueMutationNew()
+                )
+                return result
             else:
                 return ConstDictVariable(items, mutation_type=ValueMutationNew())
 
