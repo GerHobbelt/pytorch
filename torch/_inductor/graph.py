@@ -145,10 +145,16 @@ aten = torch.ops.aten
 _post_grad_graph_counter = itertools.count()
 
 if config.is_fbcode():
+    from torch._inductor.fb.triton_kernel_metadata import (
+        save_triton_kernel_perf_artifact,
+    )
     from torch._inductor.fb.utils import log_module_code
 else:
 
     def log_module_code(*args: Any, **kwargs: Any) -> None:
+        pass
+
+    def save_triton_kernel_perf_artifact(*args: Any, **kwargs: Any) -> None:
         pass
 
 
@@ -367,8 +373,10 @@ class GraphLowering(torch.fx.Interpreter):
         name: str | None = None,
         inputs_to_check: Sequence[int] | None = None,
         fx_wrapper: bool = False,
+        get_decomp_fn: Callable[..., dict[Any, Callable[..., Any]]] | None = None,
     ) -> None:
         super().__init__(gm)
+        self.get_decomp_fn = get_decomp_fn
         self.example_inputs = example_inputs
         self.layout_opt = (
             layout_opt
@@ -1309,7 +1317,7 @@ class GraphLowering(torch.fx.Interpreter):
             )
             base_name = target.name().split(".")[0]
             if base_name in FALLBACK_ALLOW_LIST:
-                make_fallback(target, warn=False, override_decomp=True)
+                make_fallback(target, warn=False, get_decomp_fn=self.get_decomp_fn)
             elif config.implicit_fallbacks:
                 error = (
                     MissingOperatorWithDecomp
@@ -1347,7 +1355,11 @@ class GraphLowering(torch.fx.Interpreter):
                     )
                     decided_constraint = tag_to_layout_constraint(default_tag)
 
-                make_fallback(target, layout_constraint=decided_constraint)
+                make_fallback(
+                    target,
+                    layout_constraint=decided_constraint,
+                    get_decomp_fn=self.get_decomp_fn,
+                )
 
             elif get_decompositions([target]):
                 # There isn't a good way to dynamically patch this in
@@ -2459,6 +2471,7 @@ class GraphLowering(torch.fx.Interpreter):
                     if user_defined_kernels:
                         real_inputs = extract_real_inputs()
                         self.extract_autotune_inputs(real_inputs)
+                        save_triton_kernel_perf_artifact(self)
                 return self.codegen()
             else:
                 if not self.aot_mode:

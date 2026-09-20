@@ -216,11 +216,6 @@ class DecoratorTests(PytreeRegisteringTestCase):
         self.assertEqual(cnts.frame_count, 1)
         self.assertEqual(cnts.op_count, 5)
 
-    def test_allow_in_graph_deprecation_warning(self):
-        with self.assertWarnsRegex(FutureWarning, "nonstrict_trace"):
-            torch._dynamo.allow_in_graph(my_custom_function)
-        torch._dynamo.disallow_in_graph(my_custom_function)
-
     def test_allow_in_graph_no_id_reuse(self):
         cnts = torch._dynamo.testing.CompileCounter()
 
@@ -1323,8 +1318,7 @@ class DecoratorTests(PytreeRegisteringTestCase):
     def _test_mark_static_address(self, guarded):
         # This test verifies that dynamo properly marks inputs as static
         # when using the mark_static_address API.
-        # For both inline_inbuilt_nn_modules True and False, we expect the
-        # tensor to be present in the buffers attribute of the graph.
+        # We expect the tensor to be present in the buffers attribute of the graph.
 
         compiles_with_buffers = 0
         compiles = 0

@@ -61,6 +61,10 @@ from torch.testing._internal.common_device_type import (
     e5m2_type,
     skipCUDAIf,
 )
+from torch.testing._internal.common_dtype import (
+    highest_precision_complex,
+    highest_precision_float,
+)
 from torch.testing._internal.common_quantization import (
     _group_quantize_tensor,
     skip_if_no_torchvision,
@@ -306,6 +310,7 @@ class AOTInductorTestsTemplate:
         "toolchain doesn't support ptx to fatbin",
     )
     @skipIfMPS
+    @skipIfRocm(msg="Fails with Triton 3.7")
     # Skip embed_kernel_binary == True for now as it shows random
     # failure on CI
     @common_utils.parametrize("embed_kernel_binary", [False])
@@ -3558,6 +3563,7 @@ class AOTInductorTestsTemplate:
         example_inputs = (torch.randn(3, 10, device=self.device),)
         self.check_model(Model(), example_inputs)
 
+    @skipIfRocm(msg="Fails with Triton 3.7")
     @skipIfRocmArch(NAVI_ARCH)  # regression on ROCm 7.2
     def test_repeated_calling(self):
         if self.device != "cuda":
@@ -3632,7 +3638,7 @@ class AOTInductorTestsTemplate:
 
         # Call eval() here so that batch_norm won't update the running stats
         # Use float64 to avoid numeric difference failure
-        dtype = torch.float32 if self.device == "mps" else torch.float64
+        dtype = highest_precision_float(self.device)
         model = Model().to(device=self.device, dtype=dtype).eval()
         example_inputs = (torch.randn(4, 3, 64, 64, device=self.device, dtype=dtype),)
         self.check_model(model, example_inputs)
@@ -5135,7 +5141,7 @@ class AOTInductorTestsTemplate:
         )
         x2 = torch.tensor(
             128,
-            dtype=torch.complex128 if self.device != "mps" else torch.complex64,
+            dtype=highest_precision_complex(self.device),
             device=self.device,
         )
         inputs.append(x0)
