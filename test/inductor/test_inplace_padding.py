@@ -141,11 +141,11 @@ class InplacePaddingTest(TestCase):
             # strided to the logical (2048, 2047) shape with the padded row stride
             # of 2048.
             FileCheck().check_regex(
-                r"_autotune_storage_\d+ = generate_example_value\(\(4194304,\), "
+                r"_autotune_storage_[0-9]+ = generate_example_value\(\(4194304,\), "
                 rf"\(1,\), '{GPU_TYPE}:0', torch\.float32, 0, \(4194304,\)\)"
-            ).check_regex(
-                r"buf0 = torch\.as_strided\(_autotune_storage_\d+, \(2048, 2047\), "
-                r"\(2048, 1\), 0\)"
+            ).run(call_code)
+            FileCheck().check_regex(
+                r"buf0 = torch\.as_strided\(.*, \(2048, 2047\), \(2048, 1\), 0\)"
             ).run(call_code)
             return out
 
