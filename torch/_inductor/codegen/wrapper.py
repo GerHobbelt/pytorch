@@ -33,6 +33,7 @@ from torch._inductor.codegen.multi_kernel import MultiKernelState
 from torch._inductor.runtime.runtime_utils import cache_dir
 from torch._library.opaque_object import get_opaque_obj_repr, is_opaque_constant_type
 from torch._logging import trace_structured
+from torch.fx.experimental._size_hinting import consistent_hints, ConsistentHintState
 from torch.fx.experimental.proxy_tensor import (
     _coor_check_current_accelerator,
     _coor_current_accelerator,
@@ -1307,6 +1308,7 @@ class ExternKernelOutLine(WrapperLine):
             device,
             self.node.get_stack_traces(),
             profiling_args=profiling_args,
+            tunable_dyn_dims_mask=node.tunable_dyn_dims_mask,
         )
 
     def codegen_fx(self, converter: FxConverter) -> FxConversionFunc:
@@ -2188,6 +2190,9 @@ class PythonWrapperCodegen(CodeGen):
         self.kernel_autotune_storage_cache: dict[str, AutotuneStorage] = {}
         self.kernel_autotune_tmp_arg_idx: int = 0
         self.kernel_autotune_storage_idx: int = 0
+        # Values chosen for unbacked symbols in the autotune block, so all
+        # example values agree; created on first use.
+        self.kernel_autotune_hint_state: ConsistentHintState | None = None
         # If the generated source code is exactly the same, reuse the
         # pre-existing kernel for it
         self.src_to_kernel: dict[str, str] = {}
@@ -2309,6 +2314,42 @@ class PythonWrapperCodegen(CodeGen):
     def write_constant(self, name: str, hashed: str) -> None:
         self.header.writeline(f"{name} = None  # {hashed}")
 
+    def _preamble_imports(self) -> tuple[str, ...]:
+        return (
+            "from ctypes import c_void_p, c_long, c_int",
+            "import torch",
+            "import math",
+            "import random",
+            "import os",
+            "import tempfile",
+            "from math import inf, nan",
+            "from cmath import nanj",
+            "from torch._inductor.hooks import run_intermediate_hooks",
+            "from torch._inductor.utils import maybe_profile",
+            "from torch._inductor.codegen.memory_planning import _align as align",
+            "from torch import device, empty_strided",
+            "from torch._inductor.select_algorithm import extern_kernels",
+        )
+
+    def _preamble_bindings(self) -> tuple[str, ...]:
+        guards = "torch._C._dynamo.guards"
+        return (
+            "aten = torch.ops.aten",
+            "inductor_ops = torch.ops.inductor",
+            "_quantized = torch.ops._quantized",
+            f"assert_size_stride = {guards}.assert_size_stride",
+            f"assert_size_stride_grouped = {guards}.assert_size_stride_grouped",
+            f"assert_alignment = {guards}.assert_alignment",
+            f"empty_strided_cpu = {guards}._empty_strided_cpu",
+            f"empty_strided_cpu_pinned = {guards}._empty_strided_cpu_pinned",
+            f"empty_strided_cuda = {guards}._empty_strided_cuda",
+            f"empty_strided_xpu = {guards}._empty_strided_xpu",
+            f"empty_strided_mtia = {guards}._empty_strided_mtia",
+            f"reinterpret_tensor = {guards}._reinterpret_tensor",
+            "alloc_from_pool = torch.ops.inductor._alloc_from_pool",
+            "async_compile = AsyncCompile()",
+        )
+
     def write_header(self) -> None:
         """Write the header section of the generated Python wrapper code."""
         context = torch._guards.TracingContext.try_get()
@@ -2319,48 +2360,17 @@ class PythonWrapperCodegen(CodeGen):
         if int(config.aot_inductor.debug_intermediate_value_printer) > 0:
             inductor_debug_utils = "from torch._inductor.codegen.debug_utils import _print_debugging_tensor_value_info"
         elif torch._inductor.config.test_configs.track_memory_lifecycle:
-            inductor_debug_utils = "from torch._inductor.runtime.debug_utils import tracked_empty_strided\n"
+            inductor_debug_utils = (
+                "from torch._inductor.runtime.debug_utils import tracked_empty_strided"
+            )
 
-        self.imports.splice(
-            f"""
-                {aot_config_comment}
-                from ctypes import c_void_p, c_long, c_int
-                import torch
-                import math
-                import random
-                import os
-                import tempfile
-                from math import inf, nan
-                from cmath import nanj
-                from torch._inductor.hooks import run_intermediate_hooks
-                from torch._inductor.utils import maybe_profile
-                from torch._inductor.codegen.memory_planning import _align as align
-                from torch import device, empty_strided
-                from {async_compile.__name__} import AsyncCompile
-                from torch._inductor.select_algorithm import extern_kernels
-                {inductor_debug_utils}
-            """,
-            strip=True,
-        )
-        self.header.splice(
-            """
-                aten = torch.ops.aten
-                inductor_ops = torch.ops.inductor
-                _quantized = torch.ops._quantized
-                assert_size_stride = torch._C._dynamo.guards.assert_size_stride
-                assert_size_stride_grouped = torch._C._dynamo.guards.assert_size_stride_grouped
-                assert_alignment = torch._C._dynamo.guards.assert_alignment
-                empty_strided_cpu = torch._C._dynamo.guards._empty_strided_cpu
-                empty_strided_cpu_pinned = torch._C._dynamo.guards._empty_strided_cpu_pinned
-                empty_strided_cuda = torch._C._dynamo.guards._empty_strided_cuda
-                empty_strided_xpu = torch._C._dynamo.guards._empty_strided_xpu
-                empty_strided_mtia = torch._C._dynamo.guards._empty_strided_mtia
-                reinterpret_tensor = torch._C._dynamo.guards._reinterpret_tensor
-                alloc_from_pool = torch.ops.inductor._alloc_from_pool
-                async_compile = AsyncCompile()
-            """,
-            strip=True,
-        )
+        if aot_config_comment:
+            self.imports.writeline(aot_config_comment)
+        self.imports.writelines(self._preamble_imports())
+        self.imports.writeline(f"from {async_compile.__name__} import AsyncCompile")
+        if inductor_debug_utils:
+            self.imports.writeline(inductor_debug_utils)
+        self.header.writelines(self._preamble_bindings())
         try:
             # Only add empty_strided_p2p() if distributed and SymmetricMemory
             # is available
@@ -3135,9 +3145,11 @@ class PythonWrapperCodegen(CodeGen):
         device: str,
         stack_traces: OrderedSet[str] | None = None,
         profiling_args: Sequence[str | None] | None = None,
+        tunable_dyn_dims_mask: tuple[bool, bool, bool, bool] | None = None,
     ) -> None:
         # profiling_args is consumed only by the CppWrapperCpu override (to
         # record profiling metadata); the Python wrapper ignores it.
+        # tunable_dyn_dims_mask is consumed only by the GPU C++ wrapper.
         # add debug printer code for triton kernel calls at (jit) inductor level
         debug_printer_manager = V.graph.wrapper_code.debug_printer
         debug_printer_manager.set_printer_args(args, kernel, None, None, "extern")
@@ -4292,9 +4304,8 @@ class PythonWrapperCodegen(CodeGen):
     ) -> None:
         """Bind ``kernel_name`` to a launchable Triton kernel at module scope.
 
-        The default form hands the kernel to AsyncCompile as a source string, which is
-        what lets compilation fan out to the worker pool. When
-        ``defines_triton_kernels_as_code()`` the kernel is defined as code instead.
+        The python wrapper defines the kernel as code. Wrappers that consume a kernel's
+        ``async_compile.triton(...)`` source themselves get that string form instead.
         """
         if not self.defines_triton_kernels_as_code():
             self.define_kernel(
@@ -4303,6 +4314,10 @@ class PythonWrapperCodegen(CodeGen):
                 metadata,
             )
             return
+        if "\\" in src_code:
+            # The string form compiles what its ''' literal decodes to, and codegen
+            # escapes for that (inline asm doubles its backslashes), so decode it here.
+            src_code = ast.literal_eval(f"'''{src_code}'''")
         # When inductor loads this module, the def binds the kernel AsyncCompile built
         # from this source rather than compiling itself in process, so the worker pool
         # can start on it now, as it does for a string kernel. It gets the source the
@@ -4330,14 +4345,15 @@ class PythonWrapperCodegen(CodeGen):
             self.kernel_harness_modules.append(kernel_key)
         if "if __name__ == '__main__':" in src_code:
             raise AssertionError(f"kernel {kernel_name} kept its benchmark harness")
-        # The string form passes filename=__file__ from its own module, which is named by
-        # the hash of this source, and the autotune cache keys on that basename. Here
-        # __file__ is the wrapper, which every kernel shares, so name the module the
-        # string form would have used, in the wrapper's directory.
+        # The string form passes filename=__file__ from its own module, which
+        # AsyncCompile writes to cache_dir()/<hash[1:3]>/<hash>.py for this source's
+        # hash, and the autotune cache keeps the kernel's .best_config beside it. Here
+        # __file__ is the wrapper, which a loader may put anywhere, so name that file.
         if "filename=__file__" in src_code:
-            path = f"os.path.join(os.path.dirname(__file__), {kernel_file!r})"
+            path = f"os.path.join(cache_dir(), {kernel_file[1:3]!r}, {kernel_file!r})"
             src_code = src_code.replace("filename=__file__", f"filename={path}")
-            src_code = f"import os\n{src_code}"
+            runtime_utils = "torch._inductor.runtime.runtime_utils"
+            src_code = f"import os\nfrom {runtime_utils} import cache_dir\n{src_code}"
         # src_code is already a complete module: the triton imports, the
         # @triton_heuristics.* decorator that builds the CachingAutotuner, and the
         # @triton.jit def. Spliced at module level it binds kernel_name to the same
@@ -4362,8 +4378,7 @@ class PythonWrapperCodegen(CodeGen):
         )
 
     def defines_triton_kernels_as_code(self) -> bool:
-        # Off until module-level kernels compile as fast as string ones; tests patch it.
-        return False
+        return True
 
     @staticmethod
     def async_compile_triton_body(
@@ -4687,10 +4702,7 @@ class PythonWrapperCodegen(CodeGen):
         triton_info_kernel_cls = self._get_triton_info_kernel_cls()
         inductor_meta.update(triton_info_kernel_cls.inductor_meta_common())
 
-        as_code = self.defines_triton_kernels_as_code()
         compile_wrapper = IndentedBuffer()
-        if not as_code:
-            compile_wrapper.writeline(f"async_compile.triton({subs_name!r}, '''")
         compile_wrapper.splice(triton_info_kernel_cls.gen_common_triton_imports())
         for type_spec in get_importable_constexpr_types(
             triton_meta.get("constants", {}).values()
@@ -4727,15 +4739,21 @@ class PythonWrapperCodegen(CodeGen):
         _, lineno = inspect.getsourcelines(kernel.fn)
         srcfile = inspect.getsourcefile(kernel.fn)
         metadata = f"# Original path: {srcfile}:{lineno}"
-        if as_code:
-            compile_wrapper.splice(kernel_src)
+        compile_wrapper.splice(kernel_src)
+        # The string form compiles what its ''' literal decodes to, and
+        # emit_triton_kernel_definition decodes a module-level kernel the same way, so
+        # both take the whole source escaped: the meta reprs as well as the kernel.
+        src_code = _escape_triton_kernel_source_for_wrapper(compile_wrapper.getvalue())
+        if self.defines_triton_kernels_as_code():
             self.emit_triton_kernel_definition(
-                name, subs_name, compile_wrapper.getvalue(), device_type, metadata
+                name, subs_name, src_code, device_type, metadata
             )
         else:
-            compile_wrapper.splice(_escape_triton_kernel_source_for_wrapper(kernel_src))
-            compile_wrapper.writeline(f"''', device_str='{device_type}')")
-            self.define_kernel(name, compile_wrapper.getvalue(), metadata)
+            string_form = IndentedBuffer()
+            string_form.writeline(f"async_compile.triton({subs_name!r}, '''")
+            string_form.splice(src_code)
+            string_form.writeline(f"''', device_str='{device_type}')")
+            self.define_kernel(name, string_form.getvalue(), metadata)
         # Add to the cache for the next use
         self.user_defined_kernel_cache[cache_key] = (name, triton_meta, inductor_meta)
         return name, triton_meta, inductor_meta, extra_launcher_call_args
@@ -5080,6 +5098,32 @@ class PythonWrapperCodegen(CodeGen):
         Tensor arguments use shared backing storage when ``storage_arg`` is
         provided; unsupported arguments retain independent allocation.
         """
+        # Example values must agree with each other: a view must fit its
+        # backing storage and scalars must match tensor shapes.
+        if self.kernel_autotune_hint_state is None:
+            self.kernel_autotune_hint_state = ConsistentHintState(
+                V.graph.sizevars.shape_env
+            )
+        with consistent_hints(self.kernel_autotune_hint_state):
+            return self._generate_example_arg_value(
+                arg,
+                arg_type,
+                raw_arg,
+                kernel_name=kernel_name,
+                storage_cache=storage_cache,
+                storage_arg=storage_arg,
+            )
+
+    def _generate_example_arg_value(
+        self,
+        arg,
+        arg_type,
+        raw_arg=None,
+        *,
+        kernel_name: str | None = None,
+        storage_cache: dict[str, AutotuneStorage] | None = None,
+        storage_arg: AutotuneStorageArg | None = None,
+    ):
         if isinstance(arg_type, torch_dtype):
             if isinstance(raw_arg, ir.TMADescriptor):
                 # first we generate the underlying buffer
